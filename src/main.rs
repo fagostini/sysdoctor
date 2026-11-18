@@ -23,7 +23,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Cmd {
     /// Health report. Exit code: 0 ok, 1 warn, 2 crit.
-    Check,
+    Check {
+        /// One-line JSON for status bars (waybar format: text, tooltip, class); always exits 0
+        #[arg(long)]
+        bar: bool,
+    },
     /// List reclaimable space (dry run by default)
     Clean {
         /// Move listed regenerable user paths to the trash (asks first)
@@ -35,6 +39,9 @@ enum Cmd {
         /// Install and enable an hourly systemd user timer
         #[arg(long)]
         install: bool,
+        /// Silence notifications for this many hours (0 = resume)
+        #[arg(long, value_name = "HOURS")]
+        snooze: Option<u64>,
     },
     /// Show what grew on disk
     Growth {
@@ -42,6 +49,32 @@ enum Cmd {
         #[arg(long, default_value_t = 7)]
         days: u64,
     },
+    /// Internal: show a notification with buttons and handle the click
+    #[command(hide = true)]
+    Notify {
+        #[arg(long)]
+        urgency: String,
+        title: String,
+        body: String,
+    },
+}
+
+/// Status bar summary: icon + problem count, problems as tooltip, worst severity as CSS class.
+fn bar(findings: &[Finding]) -> serde_json::Value {
+    let problems: Vec<&Finding> = findings.iter().filter(|f| f.severity != Severity::Ok).collect();
+    let worst = problems.iter().map(|f| f.severity).max().unwrap_or(Severity::Ok);
+    let (icon, class) = match worst {
+        Severity::Ok => ("✓", "ok"),
+        Severity::Warn => ("⚠", "warn"),
+        Severity::Crit => ("✖", "crit"),
+    };
+    let text = if problems.is_empty() { icon.to_string() } else { format!("{icon} {}", problems.len()) };
+    let tooltip = if problems.is_empty() {
+        "sysdoctor: all checks ok".to_string()
+    } else {
+        problems.iter().map(|f| f.title.as_str()).collect::<Vec<_>>().join("\n")
+    };
+    serde_json::json!({ "text": text, "tooltip": tooltip, "class": class, "alt": class })
 }
 
 fn paint(sev: Severity, color: bool) -> &'static str {
@@ -87,15 +120,26 @@ fn main() -> ExitCode {
     };
 
     let findings: Vec<Finding> = match cli.cmd {
-        Cmd::Check => check::CHECKS.iter().flat_map(|c| c()).collect(),
+        Cmd::Check { bar: true } => {
+            let f: Vec<Finding> = check::CHECKS.iter().flat_map(|c| c()).collect();
+            println!("{}", bar(&f));
+            return ExitCode::SUCCESS; // bars treat non-zero exit as module failure
+        }
+        Cmd::Check { bar: false } => check::CHECKS.iter().flat_map(|c| c()).collect(),
         Cmd::Clean { .. } => {
             let mut v: Vec<Finding> = clean::SCANNERS.iter().flat_map(|s| s(&home)).collect();
             v.sort_by_key(|f| std::cmp::Reverse(f.bytes.unwrap_or(0)));
             v
         }
-        Cmd::Watch { install } => {
+        Cmd::Notify { ref urgency, ref title, ref body } => {
+            watch::notify_interactive(urgency, title, body);
+            return ExitCode::SUCCESS;
+        }
+        Cmd::Watch { install, snooze } => {
             let r = if install {
                 watch::install()
+            } else if let Some(h) = snooze {
+                watch::snooze(h)
             } else {
                 let f: Vec<Finding> = check::CHECKS.iter().flat_map(|c| c()).collect();
                 let w = watch::watch(&f);
@@ -126,8 +170,8 @@ fn main() -> ExitCode {
     }
 
     match cli.cmd {
-        Cmd::Watch { .. } | Cmd::Growth { .. } => unreachable!("returned above"),
-        Cmd::Check => ExitCode::from(findings.iter().map(|f| f.severity).max().unwrap_or(Severity::Ok) as u8),
+        Cmd::Watch { .. } | Cmd::Growth { .. } | Cmd::Notify { .. } | Cmd::Check { bar: true } => unreachable!("returned above"),
+        Cmd::Check { bar: false } => ExitCode::from(findings.iter().map(|f| f.severity).max().unwrap_or(Severity::Ok) as u8),
         Cmd::Clean { apply } => {
             if !cli.json {
                 let total: u64 = findings.iter().filter_map(|f| f.bytes).sum();
@@ -166,5 +210,25 @@ fn main() -> ExitCode {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bar_output() {
+        let ok = [Finding::ok("ntp", "Clock synced")];
+        assert_eq!(bar(&ok)["text"], "✓");
+        assert_eq!(bar(&ok)["class"], "ok");
+        let mixed = [
+            Finding::ok("ntp", "Clock synced"),
+            Finding::new("battery", Severity::Warn, "BAT1 health 79%"),
+            Finding::new("smart", Severity::Crit, "/dev/sda SMART health FAILED"),
+        ];
+        let b = bar(&mixed);
+        assert_eq!((b["text"].as_str(), b["class"].as_str()), (Some("✖ 2"), Some("crit")));
+        assert_eq!(b["tooltip"], "BAT1 health 79%\n/dev/sda SMART health FAILED");
     }
 }

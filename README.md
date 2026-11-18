@@ -65,6 +65,40 @@ sysdoctor check >/dev/null || echo "something needs attention"
 
 Run with `sudo` to include the checks that need root, such as SMART.
 
+#### Status bar (`--bar`)
+
+`sysdoctor check --bar` prints one line of JSON for status bars and always exits 0:
+
+```json
+{"text":"⚠ 2","tooltip":"system unit casper-md5check.service failed\nBAT1 health 79%","class":"warn","alt":"warn"}
+```
+
+`text` is ✓, ⚠ or ✖ plus the number of problems, `tooltip` lists them, and `class` is `ok`, `warn` or `crit` for styling.
+
+**Waybar** (`~/.config/waybar/config`):
+
+```json
+"custom/sysdoctor": {
+    "exec": "sysdoctor check --bar",
+    "return-type": "json",
+    "interval": 300,
+    "on-click": "x-terminal-emulator -e 'sh -c \"sysdoctor check; read _\"'"
+}
+```
+
+```css
+#custom-sysdoctor.warn { color: #e5a50a; }
+#custom-sysdoctor.crit { color: #e01b24; }
+```
+
+**Polybar, i3blocks and others** that take plain text can extract the text field:
+
+```sh
+sysdoctor check --bar | jq -r .text
+```
+
+**GNOME** can show it with the Executor or Argos extensions.
+
 ### `sysdoctor clean [--apply]`
 
 Lists reclaimable space, largest first. By default it is a **dry run** and changes nothing.
@@ -85,6 +119,20 @@ Lists reclaimable space, largest first. By default it is a **dry run** and chang
 ### `sysdoctor watch [--install]`
 
 Runs the checks and sends a desktop notification **only for problems that were not there on the previous run**. A problem whose number changes ("91% full" → "92% full") is not new, but one that gets worse (warning → critical) is.
+
+Several new problems at once arrive as **one** notification listing them all. Each notification has two buttons:
+
+- **Show report** opens a terminal with the full `sysdoctor check` output (uses `x-terminal-emulator`).
+- **Snooze 24h** silences notifications for a day.
+
+Snooze from the command line too:
+
+```sh
+sysdoctor watch --snooze 8   # quiet for 8 hours
+sysdoctor watch --snooze 0   # resume
+```
+
+Problems that appear during a snooze are remembered as seen, so they won't pop up when it ends. `sysdoctor check` still shows them.
 
 It also records a disk-size snapshot, at most once a day, for `growth`.
 
@@ -176,7 +224,9 @@ Plugins are stopped after 10 seconds. Files writable by group or others are igno
 
 **Runs as your user.** Everything works without root. Root-only checks say so and are skipped. Nothing is setuid, and no daemon is required.
 
-**Quiet by design.** The background watcher only speaks up about new problems. A warning you have already seen does not ping you every hour.
+**Quiet by design.** The background watcher only speaks up about new problems, grouped into one notification. A warning you have already seen does not ping you every hour.
+
+**No resident process.** There is no tray daemon. Notifications and the status bar output cover the same ground. Waiting for a click on a notification button runs as a short-lived transient unit (`systemd-run --user`), because the timer's own job is ended as soon as `watch` exits.
 
 **Cheap to run often.** Hourly runs take a fraction of a second. The expensive full disk-size measurement runs at most once a day, in parallel, at idle I/O priority.
 
@@ -186,6 +236,7 @@ Plugins are stopped after 10 seconds. Files writable by group or others are igno
 |---|---|
 | `last.json` | Problems seen on the previous `watch` run |
 | `growth.jsonl` | One disk-size snapshot per line, appended daily |
+| `snooze-until` | Unix time when a snooze ends |
 
 Delete them at any time to reset.
 

@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn state_dir() -> io::Result<PathBuf> {
@@ -30,20 +31,82 @@ pub fn new_problems<'a>(prev: &HashSet<String>, findings: &'a [Finding]) -> Vec<
     findings.iter().filter(|f| f.severity != Severity::Ok && !prev.contains(&key(f))).collect()
 }
 
-fn notify(f: &Finding) {
-    let urgency = if f.severity == Severity::Crit { "critical" } else { "normal" };
-    let title = format!("sysdoctor: {}", f.title);
-    if run("notify-send", &["-a", "sysdoctor", "-u", urgency, &title, &f.detail]).is_none() {
-        println!("{title}"); // lands in the journal when run from the timer
+/// One grouped notification for a batch of new problems: (urgency, title, body).
+pub fn summary(new: &[&Finding]) -> (&'static str, String, String) {
+    let crit = new.iter().any(|f| f.severity == Severity::Crit);
+    let urgency = if crit { "critical" } else { "normal" };
+    match new {
+        [f] => (urgency, format!("sysdoctor: {}", f.title), f.detail.clone()),
+        _ => (
+            urgency,
+            format!("sysdoctor: {} new problems", new.len()),
+            new.iter().map(|f| format!("• {}", f.title)).collect::<Vec<_>>().join("\n"),
+        ),
     }
 }
 
+fn notify(new: &[&Finding]) {
+    if new.is_empty() {
+        return;
+    }
+    let (urgency, title, body) = summary(new);
+    // Waiting for a button click must outlive this process: the timer's oneshot cgroup is killed
+    // when `watch` exits, so the waiter runs in its own transient user unit.
+    let launched = std::env::current_exe().is_ok_and(|exe| {
+        Command::new("systemd-run")
+            .args(["--user", "--collect", "--quiet"])
+            .arg(exe)
+            .args(["notify", "--urgency", urgency, &title, &body])
+            .status()
+            .is_ok_and(|s| s.success())
+    });
+    if !launched && run("notify-send", &["-a", "sysdoctor", "-u", urgency, &title, &body]).is_none() {
+        println!("{title}\n{body}"); // lands in the journal when run from the timer
+    }
+}
+
+/// Show a notification with buttons and act on the click. Blocks until clicked or dismissed.
+pub fn notify_interactive(urgency: &str, title: &str, body: &str) {
+    let out = Command::new("notify-send")
+        .args(["-a", "sysdoctor", "-u", urgency, "--action=report=Show report", "--action=snooze=Snooze 24h", title, body])
+        .output();
+    match out.as_ref().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).as_deref() {
+        Ok("report") => open_report(),
+        Ok("snooze") => {
+            let _ = snooze(24);
+        }
+        _ => {}
+    }
+}
+
+fn open_report() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    // One string after -e: understood by terminator, gnome-terminal and xterm alike.
+    let cmd = format!("sh -c '\"{}\" check; printf \"\\nPress Enter to close\"; read _'", exe.display());
+    // ponytail: Debian/Ubuntu/Mint alternatives link; add a config knob if other distros need it.
+    let _ = Command::new("x-terminal-emulator").args(["-e", &cmd]).status();
+}
+
+/// Silence notifications for `hours` (0 = unsnooze).
+pub fn snooze(hours: u64) -> io::Result<()> {
+    fs::write(state_dir()?.join("snooze-until"), (now() + hours * 3600).to_string())
+}
+
+fn snoozed() -> bool {
+    state_dir()
+        .ok()
+        .and_then(|d| fs::read_to_string(d.join("snooze-until")).ok())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .is_some_and(|t| t > now())
+}
+
 /// Notify about problems not present last run, then save current state.
+/// While snoozed, state still updates: problems that appear during a snooze stay silent.
 pub fn watch(findings: &[Finding]) -> io::Result<()> {
     let path = state_dir()?.join("last.json");
     let prev: HashSet<String> = fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-    for f in new_problems(&prev, findings) {
-        notify(f);
+    if !snoozed() {
+        notify(&new_problems(&prev, findings));
     }
     let cur: Vec<String> = findings.iter().filter(|f| f.severity != Severity::Ok).map(key).collect();
     fs::write(&path, serde_json::to_string(&cur)?)
@@ -174,6 +237,16 @@ mod tests {
         assert_eq!(got, ["ntp"]);
         let esc = [f("disk-full", Severity::Crit, "/ is 98% full")]; // escalation re-notifies
         assert_eq!(new_problems(&prev, &esc).len(), 1);
+    }
+
+    #[test]
+    fn grouped_summary() {
+        let a = Finding::new("ntp", Severity::Warn, "Clock not NTP-synced").detail("d");
+        let b = Finding::new("smart", Severity::Crit, "/dev/sda SMART health FAILED");
+        assert_eq!(summary(&[&a]), ("normal", "sysdoctor: Clock not NTP-synced".into(), "d".into()));
+        let (u, t, body) = summary(&[&a, &b]);
+        assert_eq!((u, t.as_str()), ("critical", "sysdoctor: 2 new problems"));
+        assert_eq!(body, "• Clock not NTP-synced\n• /dev/sda SMART health FAILED");
     }
 
     #[test]
