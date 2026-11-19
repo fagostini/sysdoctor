@@ -68,6 +68,13 @@ pub fn exe() -> std::io::Result<PathBuf> {
     Ok(p.to_str().and_then(|s| s.strip_suffix(" (deleted)")).map(PathBuf::from).unwrap_or(p))
 }
 
+/// `sudo <full path to this binary> <args>`: sudo's secure_path usually lacks ~/.cargo/bin.
+pub fn sudo_self(args: &str) -> String {
+    let exe = exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "sysdoctor".into());
+    let exe = if exe.contains(' ') { format!("'{exe}'") } else { exe };
+    format!("sudo {exe} {args}")
+}
+
 /// XDG base dir: $var if set and absolute, else $HOME/fallback.
 pub fn xdg(var: &str, fallback: &str) -> Option<PathBuf> {
     std::env::var_os(var)

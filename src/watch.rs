@@ -202,7 +202,14 @@ pub fn trends() -> io::Result<()> {
     let samples = load_jsonl::<Metrics>(&state_dir()?.join("trends.jsonl"));
     if samples.len() < 2 {
         println!("Not enough history yet ({} sample). The timer (`sysdoctor watch --install`) records one daily.", samples.len());
-        println!("Disk wear needs root: run the timer's command once as `sudo sysdoctor trends` to include it.");
+        // smartctl needs root and the timer runs as you, so wear is only tracked if the history was recorded as root
+        let root = fs::metadata("/proc/self").is_ok_and(|m| std::os::unix::fs::MetadataExt::uid(&m) == 0);
+        if !root {
+            match crate::finding::run("smartctl", &["--version"]) {
+                None => println!("Disk wear is not tracked: install smartmontools ({}).", crate::pkg::install("smartmontools")),
+                Some(_) => println!("Disk wear is not tracked: smartctl needs root, and the timer runs as your user."),
+            }
+        }
         return Ok(());
     }
     for (k, (v0, t0, v1, t1)) in trend_table(&samples) {

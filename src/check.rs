@@ -161,7 +161,7 @@ fn smart() -> Vec<Finding> {
             ),
             Some(true) => {}
             None => {
-                return vec![Finding::skipped("smart", "needs root").cmd("sudo sysdoctor check")];
+                return vec![Finding::skipped("smart", "needs root").cmd(crate::finding::sudo_self("check"))];
             }
         }
     }

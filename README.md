@@ -129,7 +129,7 @@ Exit code is the worst severity found: `0` ok, `1` warning, `2` critical:
 sysdoctor check >/dev/null || echo "something needs attention"
 ```
 
-Run with `sudo` to include checks that need root, such as SMART.
+Run with `sudo` to include checks that need root, such as SMART. With a `cargo install`, use `sudo "$(command -v sysdoctor)" check`, because `sudo` does not search `~/.cargo/bin`.
 
 **Secrets in history** are reported by file and line number only. The secret itself is never printed. Revoke the token first: history files get backed up and synced.
 
