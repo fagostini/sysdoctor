@@ -143,14 +143,14 @@ fn item(label: impl Into<String>, enabled: bool, f: impl Fn(&mut SysTray) + Send
 }
 
 /// The report window when built with it, else the report in a terminal.
+/// Decided at run time: the binary now at our path may be a rebuild without `gui`, which exits 2.
 fn report() {
-    if cfg!(feature = "gui") {
-        if let Ok(mut c) = crate::finding::exe().and_then(|exe| std::process::Command::new(exe).arg("gui").spawn()) {
-            std::thread::spawn(move || c.wait());
-            return;
+    std::thread::spawn(|| {
+        let gui = crate::finding::exe().and_then(|exe| std::process::Command::new(exe).arg("gui").status());
+        if !gui.is_ok_and(|s| s.success()) {
+            open_in_terminal("check");
         }
-    }
-    std::thread::spawn(|| open_in_terminal("check"));
+    });
 }
 
 fn terminal(args: &'static str) -> impl Fn(&mut SysTray) + Send + Sync + 'static {
