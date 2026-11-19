@@ -5,6 +5,7 @@ mod finding;
 #[cfg(feature = "gui")]
 mod gui;
 mod health;
+mod pkg;
 mod report;
 mod security;
 mod tray;

@@ -83,7 +83,7 @@ sysdoctor completions zsh > ~/.zfunc/_sysdoctor     # or bash, fish, elvish, pow
 |---|---|
 | Storage | Disk space (warns at 90%, critical at 97%), inode exhaustion, SMART health (needs root) |
 | Services | Failed systemd units, system and user |
-| Updates | Pending security updates (apt), reboot required, running kernel older than installed |
+| Updates | Pending security updates (apt, dnf, zypper; pacman shows a count only), reboot required, running kernel older than installed |
 | Memory | OOM kills this boot, sustained memory pressure (PSI) |
 | Security | Firewall active, SSH password login, permissions on `~/.ssh`, `~/.gnupg` and private keys, known API token formats in shell history |
 | Expiry | Your GPG keys, SSH certificates, Let's Encrypt and configured certificates expiring within 30 days |
@@ -166,8 +166,8 @@ Lists reclaimable space, largest first. By default it is a **dry run** and chang
 | AI model caches | Hugging Face, Ollama, torch over 100 MB | Command offered (re-downloading is slow) |
 | Stale `~/.cache` folders | Nothing written for 90+ days | Command offered (some apps keep state there) |
 | Trash | Over 10 MB | `gio trash --empty` offered |
-| apt cache | Downloaded `.deb` files | `sudo apt clean` offered |
-| Old kernels | All but the newest two and the running one | `sudo apt purge <packages>` offered |
+| Package cache | Downloaded packages (apt, dnf, pacman, zypper) | The distro's clean command offered (`apt clean`, `dnf clean packages`, `paccache -rk2`, `zypper clean`) |
+| Old kernels | All but the newest two and the running one (apt, dnf, zypper; Arch keeps one) | `apt purge <packages>`, `dnf remove --oldinstallonly` or `zypper purge-kernels` offered |
 | Docker, journal, snap, flatpak | Reclaimable images, journal over 500 MB, disabled snap revisions, unused runtimes | Their cleanup commands offered |
 
 `--apply` first shows every folder it will move to the trash and asks once. It then offers each cleanup command individually. Trashed files still use disk space until you empty the trash.
@@ -366,7 +366,7 @@ Adding a check means writing one `fn() -> Vec<Finding>` and listing it in `CHECK
 
 ### Known limits
 
-- Debian/Ubuntu/Mint-centric: updates, apt cache and old kernels use apt and dpkg. dnf and pacman are not supported yet.
+- Package checks detect apt, dnf, pacman or zypper. They read cached metadata only (no network, no root), so counts are as fresh as the last refresh. Pending reboot on Fedora needs `dnf needs-restarting` (dnf-utils). The .deb package and `x-terminal-emulator` fallback are Debian-family only.
 - The project scan skips folders whose names start with `.`, so a project kept in a hidden folder will not be found.
 - `growth` tracks only the top level of your home folder.
 - Thermal throttling uses a fixed threshold of 100 events since boot, which some laptops exceed under normal load. `ignore throttling` if it's noise for you.

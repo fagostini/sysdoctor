@@ -220,7 +220,7 @@ pub fn firmware() -> Vec<Finding> {
     }
     vec![Finding::new("firmware", Severity::Warn, format!("{} firmware file(s) failed to load", missing.len()))
         .detail(missing.join("\n"))
-        .cmd("sudo apt install linux-firmware")]
+        .cmd(crate::pkg::install("linux-firmware"))]
 }
 
 #[cfg(test)]

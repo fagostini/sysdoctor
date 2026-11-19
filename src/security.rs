@@ -21,13 +21,15 @@ pub fn count_updates(sim: &str) -> (usize, usize) {
 }
 
 pub fn updates() -> Vec<Finding> {
-    let Some(sim) = run("apt-get", &["-s", "-o", "Debug::NoLocking=1", "upgrade"]) else { return vec![] };
-    match count_updates(&sim) {
+    let Some((n, sec, cmd)) = crate::pkg::updates() else { return vec![] };
+    match (n, sec) {
         (0, _) => vec![Finding::ok("updates", "System up to date")],
-        (n, 0) => vec![Finding::ok("updates", format!("{n} updates available (none security)"))],
-        (n, s) => vec![Finding::new("updates", Severity::Warn, format!("{s} security updates pending ({n} total)"))
-            .detail("Package lists may be stale until the next `apt update`.")
-            .cmd("sudo apt update && sudo apt upgrade")],
+        (n, Some(0)) => vec![Finding::ok("updates", format!("{n} updates available (none security)"))],
+        // ponytail: pacman has no security metadata; arch-audit could add it
+        (n, None) => vec![Finding::ok("updates", format!("{n} updates available"))],
+        (n, Some(s)) => vec![Finding::new("updates", Severity::Warn, format!("{s} security updates pending ({n} total)"))
+            .detail("Based on the last metadata refresh; may be stale.")
+            .cmd(cmd)],
     }
 }
 
@@ -54,7 +56,7 @@ pub fn installed_kernels() -> Vec<String> {
 pub fn kernel() -> Vec<Finding> {
     let Some(running) = run("uname", &["-r"]).map(|s| s.trim().to_string()) else { return vec![] };
     let Some(newest) = installed_kernels().pop() else { return vec![] };
-    if vercmp(&newest, &running) == Ordering::Greater && !Path::new("/var/run/reboot-required").exists() {
+    if vercmp(&newest, &running) == Ordering::Greater && crate::pkg::reboot_needed() != Some(true) {
         return vec![Finding::new("kernel", Severity::Warn, format!("Running kernel {running}, newer {newest} installed"))
             .detail("Security fixes in the new kernel apply only after a reboot.")
             .cmd("sudo reboot")];

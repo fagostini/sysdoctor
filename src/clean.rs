@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 pub const SCANNERS: &[fn(&Path) -> Vec<Finding>] =
-    &[projects, pkg_caches, ai_caches, stale_caches, user_trash, apt_cache, old_kernels, docker, journal, snap, flatpak];
+    &[projects, pkg_caches, ai_caches, stale_caches, user_trash, pkg_cache, old_kernels, docker, journal, snap, flatpak];
 
 const MIN: u64 = 50 << 20; // ignore anything smaller than 50M
 
@@ -187,12 +187,13 @@ fn stale_caches(home: &Path) -> Vec<Finding> {
     }]
 }
 
-fn apt_cache(_: &Path) -> Vec<Finding> {
-    let b = du(Path::new("/var/cache/apt/archives"));
+fn pkg_cache(_: &Path) -> Vec<Finding> {
+    let Some((dir, cmd)) = crate::pkg::cache() else { return vec![] };
+    let b = du(Path::new(dir));
     if b < MIN {
         return vec![];
     }
-    let mut f = Finding::new("apt-cache", Severity::Ok, "Downloaded .deb packages in /var/cache/apt").cmd("sudo apt clean");
+    let mut f = Finding::new("pkg-downloads", Severity::Ok, format!("Downloaded packages in {dir}")).cmd(cmd);
     f.bytes = Some(b);
     vec![f]
 }
@@ -217,13 +218,24 @@ pub fn removable_kernels(sorted: &[String], running: &str) -> Vec<String> {
 fn old_kernels(_: &Path) -> Vec<Finding> {
     let running = run("uname", &["-r"]).unwrap_or_default().trim().to_string();
     let old = removable_kernels(&crate::security::installed_kernels(), &running);
-    let Some(dpkg) = (!old.is_empty()).then(|| run("dpkg-query", &["-W", "-f=${db:Status-Abbrev}${Package}\n", "linux-*"])).flatten() else {
-        return vec![];
-    };
-    let pkgs: Vec<&str> = old.iter().flat_map(|k| kernel_packages(&dpkg, k)).collect();
-    if pkgs.is_empty() {
+    if old.is_empty() {
         return vec![];
     }
+    use crate::pkg::Pm;
+    let cmd = match crate::pkg::detect() {
+        Some(Pm::Apt) => {
+            let Some(dpkg) = run("dpkg-query", &["-W", "-f=${db:Status-Abbrev}${Package}\n", "linux-*"]) else { return vec![] };
+            let pkgs: Vec<&str> = old.iter().flat_map(|k| kernel_packages(&dpkg, k)).collect();
+            if pkgs.is_empty() {
+                return vec![];
+            }
+            format!("sudo apt purge {}", pkgs.join(" "))
+        }
+        Some(Pm::Dnf) => "sudo dnf remove --oldinstallonly --setopt installonly_limit=2 kernel".into(),
+        Some(Pm::Zypper) => "sudo zypper purge-kernels".into(),
+        // Arch keeps one kernel per package (vmlinuz-linux has no version): nothing to remove
+        Some(Pm::Pacman) | None => return vec![],
+    };
     let bytes: u64 = old
         .iter()
         .map(|k| {
@@ -239,7 +251,7 @@ fn old_kernels(_: &Path) -> Vec<Finding> {
         .sum();
     let mut f = Finding::new("old-kernels", Severity::Ok, format!("{} old kernels (keeping the newest two and running {running})", old.len()))
         .detail(old.join(", "))
-        .cmd(format!("sudo apt purge {}", pkgs.join(" ")));
+        .cmd(cmd);
     f.bytes = Some(bytes);
     vec![f]
 }

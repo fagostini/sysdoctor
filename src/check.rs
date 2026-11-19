@@ -145,7 +145,7 @@ pub fn block_disks() -> Vec<String> {
 
 fn smart() -> Vec<Finding> {
     if run("smartctl", &["--version"]).is_none() {
-        return vec![Finding::skipped("smart", "smartctl not installed").cmd("sudo apt install smartmontools")];
+        return vec![Finding::skipped("smart", "smartctl not installed").cmd(crate::pkg::install("smartmontools"))];
     }
     let disks = block_disks();
     let mut out = vec![];
@@ -192,13 +192,17 @@ fn failed_units() -> Vec<Finding> {
 }
 
 fn reboot_required() -> Vec<Finding> {
-    if !Path::new("/var/run/reboot-required").exists() {
-        return vec![Finding::ok("reboot", "No reboot pending")];
+    match crate::pkg::reboot_needed() {
+        None => return vec![Finding::skipped("reboot", "can't tell if a reboot is pending on this distro")],
+        Some(false) => return vec![Finding::ok("reboot", "No reboot pending")],
+        Some(true) => {}
     }
+    // Debian family lists the packages that asked for it
     let pkgs = fs::read_to_string("/var/run/reboot-required.pkgs").unwrap_or_default();
     let pkgs: Vec<&str> = pkgs.lines().collect();
-    vec![Finding::new("reboot", Severity::Warn, "Reboot required")
-        .detail(format!("Updated: {}", pkgs.join(", ")))
+    let f = Finding::new("reboot", Severity::Warn, "Reboot required");
+    let f = if pkgs.is_empty() { f } else { f.detail(format!("Updated: {}", pkgs.join(", "))) };
+    vec![f
         .cmd("sudo reboot")]
 }
 
