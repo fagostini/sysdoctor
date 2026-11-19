@@ -8,7 +8,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 pub const CHECKS: &[fn() -> Vec<Finding>] = &[
-    disks, smart, failed_units, reboot_required, oom, ntp, firewall, ssh_password, battery, plugins,
+    disks, smart, failed_units, reboot_required, crate::security::kernel, crate::security::updates, oom,
+    crate::health::memory_pressure, ntp, firewall, ssh_password, crate::security::permissions,
+    crate::security::history_secrets, crate::security::expiries, crate::health::backup, battery,
+    crate::health::throttling, crate::health::firmware, crate::health::journal_digest, plugins,
 ];
 
 /// User checks in $XDG_CONFIG_HOME/sysdoctor/checks.d, Nagios-style:
@@ -85,9 +88,10 @@ fn pct(used: u64, total: u64) -> f64 {
 }
 
 fn level(p: f64) -> Severity {
+    let c = crate::config::get();
     match p {
-        p if p >= 97.0 => Severity::Crit,
-        p if p >= 90.0 => Severity::Warn,
+        p if p >= c.disk_crit => Severity::Crit,
+        p if p >= c.disk_warn => Severity::Warn,
         _ => Severity::Ok,
     }
 }
@@ -128,17 +132,22 @@ fn disks() -> Vec<Finding> {
     out
 }
 
-fn smart() -> Vec<Finding> {
-    if run("smartctl", &["--version"]).is_none() {
-        return vec![Finding::skipped("smart", "smartctl not installed").cmd("sudo apt install smartmontools")];
-    }
-    let disks: Vec<String> = fs::read_dir("/sys/block")
+/// Physical disks: /dev/<name> for sd*, nvme*, vd*, mmcblk*.
+pub fn block_disks() -> Vec<String> {
+    fs::read_dir("/sys/block")
         .into_iter()
         .flatten()
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .filter(|n| !["loop", "ram", "zram", "dm-", "md", "sr", "fd"].iter().any(|p| n.starts_with(p)))
-        .collect();
+        .collect()
+}
+
+fn smart() -> Vec<Finding> {
+    if run("smartctl", &["--version"]).is_none() {
+        return vec![Finding::skipped("smart", "smartctl not installed").cmd("sudo apt install smartmontools")];
+    }
+    let disks = block_disks();
     let mut out = vec![];
     for d in disks {
         let dev = format!("/dev/{d}");
@@ -308,28 +317,41 @@ pub fn battery_ratio(full: &str, design: &str) -> Option<f64> {
     (d > 0.0).then(|| f * 100.0 / d)
 }
 
+/// (name, health %) for each battery.
+pub fn battery_levels() -> Vec<(String, f64)> {
+    let mut v: Vec<(String, f64)> = fs::read_dir("/sys/class/power_supply")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let p = e.path();
+            let read = |f: &str| fs::read_to_string(p.join(f)).ok();
+            let r = ["energy", "charge"]
+                .iter()
+                .find_map(|k| battery_ratio(&read(&format!("{k}_full"))?, &read(&format!("{k}_full_design"))?))?;
+            name.starts_with("BAT").then_some((name, r))
+        })
+        .collect();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
+}
+
 fn battery() -> Vec<Finding> {
-    let mut out = vec![];
-    for e in fs::read_dir("/sys/class/power_supply").into_iter().flatten().flatten() {
-        let name = e.file_name().to_string_lossy().into_owned();
-        if !name.starts_with("BAT") {
-            continue;
-        }
-        let p = e.path();
-        let read = |f: &str| fs::read_to_string(p.join(f)).ok();
-        let r = ["energy", "charge"]
-            .iter()
-            .find_map(|k| battery_ratio(&read(&format!("{k}_full"))?, &read(&format!("{k}_full_design"))?));
-        let Some(r) = r else { continue };
-        out.push(if r < 60.0 {
-            Finding::new("battery", Severity::Crit, format!("{name} health {r:.0}%")).detail("Consider replacing")
-        } else if r < 80.0 {
-            Finding::new("battery", Severity::Warn, format!("{name} health {r:.0}%")).detail("Worn; capacity below 80% of design")
-        } else {
-            Finding::ok("battery", format!("{name} health {r:.0}%"))
-        });
-    }
-    out
+    let c = crate::config::get();
+    battery_levels()
+        .into_iter()
+        .map(|(name, r)| {
+            if r < c.battery_crit {
+                Finding::new("battery", Severity::Crit, format!("{name} health {r:.0}%")).detail("Consider replacing")
+            } else if r < c.battery_warn {
+                Finding::new("battery", Severity::Warn, format!("{name} health {r:.0}%"))
+                    .detail(format!("Worn; capacity below {:.0}% of design", c.battery_warn))
+            } else {
+                Finding::ok("battery", format!("{name} health {r:.0}%"))
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -1,19 +1,24 @@
 mod check;
 mod clean;
+mod config;
 mod finding;
+mod health;
+mod report;
+mod security;
+mod tray;
 mod watch;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use finding::{human, Finding, Fix, Severity};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode};
 
 /// System health check and cleanup advisor.
 #[derive(Parser)]
 #[command(version)]
 struct Cli {
-    /// Machine-readable output
+    /// Machine-readable output (check, clean, startup)
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -27,14 +32,17 @@ enum Cmd {
         /// One-line JSON for status bars (waybar format: text, tooltip, class); always exits 0
         #[arg(long)]
         bar: bool,
+        /// Offer to run each problem's fix command, one by one
+        #[arg(long, conflicts_with = "bar")]
+        fix: bool,
     },
     /// List reclaimable space (dry run by default)
     Clean {
-        /// Move listed regenerable user paths to the trash (asks first)
+        /// Trash regenerable user paths, then offer each cleanup command (asks before every step)
         #[arg(long)]
         apply: bool,
     },
-    /// Run checks, desktop-notify only new problems, record daily size snapshot (for timers)
+    /// Run checks, desktop-notify only new problems, record daily snapshots (for timers)
     Watch {
         /// Install and enable an hourly systemd user timer
         #[arg(long)]
@@ -49,6 +57,32 @@ enum Cmd {
         #[arg(long, default_value_t = 7)]
         days: u64,
     },
+    /// Show battery health and disk wear over time
+    Trends,
+    /// Privacy-scrubbed Markdown summary to paste into a forum or bug report
+    Report,
+    /// What slows boot, login and new terminals
+    Startup,
+    /// Mute findings whose id or title contains PATTERN (no argument: list)
+    Ignore {
+        pattern: Option<String>,
+        /// Remove PATTERN from the ignore list instead
+        #[arg(long, requires = "pattern")]
+        remove: bool,
+    },
+    /// Show effective configuration and where to override it
+    Config,
+    /// Status icon in the panel tray, refreshed every 15 minutes
+    Tray {
+        /// Start it at every login (XDG autostart) and launch it now
+        #[arg(long)]
+        install: bool,
+    },
+    /// Print shell completions
+    Completions { shell: clap_complete::Shell },
+    /// Print the man page (roff)
+    #[command(hide = true)]
+    Man,
     /// Internal: show a notification with buttons and handle the click
     #[command(hide = true)]
     Notify {
@@ -104,12 +138,52 @@ fn render(findings: &[Finding]) {
     }
 }
 
+fn output(findings: &[Finding], json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(findings).unwrap());
+    } else {
+        render(findings);
+    }
+}
+
 fn confirm(prompt: &str) -> bool {
     print!("{prompt} [y/N] ");
     let _ = std::io::stdout().flush();
     let mut s = String::new();
     let _ = std::io::stdin().lock().read_line(&mut s);
     s.trim().eq_ignore_ascii_case("y")
+}
+
+/// Offer each fix command, one confirmation per command; runs through `sh -c` so sudo can prompt.
+fn run_fixes<'a>(findings: impl Iterator<Item = &'a Finding>) {
+    if !std::io::stdin().is_terminal() {
+        eprintln!("Fixes need an interactive terminal to confirm each command.");
+        return;
+    }
+    for f in findings {
+        let Some(Fix::Command(cmd)) = &f.fix else { continue };
+        println!("\n{}", f.title);
+        if !confirm(&format!("  Run `{cmd}`?")) {
+            continue;
+        }
+        match Command::new("sh").args(["-c", cmd]).status() {
+            Ok(s) if s.success() => println!("  done"),
+            Ok(s) => println!("  exited with {s}"),
+            Err(e) => println!("  failed to start: {e}"),
+        }
+    }
+}
+
+/// All checks minus ignored ones; returns how many were ignored.
+fn checks() -> (Vec<Finding>, usize) {
+    let mut f: Vec<Finding> = check::CHECKS.iter().flat_map(|c| c()).collect();
+    let n = config::apply_ignores(&mut f);
+    (f, n)
+}
+
+fn fail(what: &str, e: impl std::fmt::Display) -> ExitCode {
+    eprintln!("{what}: {e}");
+    ExitCode::from(2)
 }
 
 fn main() -> ExitCode {
@@ -119,21 +193,39 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
-    let findings: Vec<Finding> = match cli.cmd {
-        Cmd::Check { bar: true } => {
-            let f: Vec<Finding> = check::CHECKS.iter().flat_map(|c| c()).collect();
-            println!("{}", bar(&f));
-            return ExitCode::SUCCESS; // bars treat non-zero exit as module failure
+    match cli.cmd {
+        Cmd::Check { bar: true, .. } => {
+            println!("{}", bar(&checks().0));
+            ExitCode::SUCCESS // bars treat non-zero exit as module failure
         }
-        Cmd::Check { bar: false } => check::CHECKS.iter().flat_map(|c| c()).collect(),
-        Cmd::Clean { .. } => {
-            let mut v: Vec<Finding> = clean::SCANNERS.iter().flat_map(|s| s(&home)).collect();
-            v.sort_by_key(|f| std::cmp::Reverse(f.bytes.unwrap_or(0)));
-            v
+        Cmd::Check { bar: false, fix } => {
+            let (f, ignored) = checks();
+            output(&f, cli.json);
+            if ignored > 0 && !cli.json {
+                println!("\n({ignored} ignored, see `sysdoctor ignore`)");
+            }
+            if fix {
+                run_fixes(f.iter().filter(|f| f.severity != Severity::Ok));
+            }
+            ExitCode::from(f.iter().map(|f| f.severity).max().unwrap_or(Severity::Ok) as u8)
+        }
+        Cmd::Clean { apply } => {
+            // scanners are I/O bound and independent: run them concurrently
+            let mut f: Vec<Finding> = std::thread::scope(|sc| {
+                let hs: Vec<_> = clean::SCANNERS.iter().map(|s| sc.spawn(|| s(&home))).collect();
+                hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+            });
+            config::apply_ignores(&mut f);
+            f.sort_by_key(|f| std::cmp::Reverse(f.bytes.unwrap_or(0)));
+            output(&f, cli.json);
+            if !cli.json {
+                println!("\nreclaimable: {}", human(f.iter().filter_map(|f| f.bytes).sum()));
+            }
+            if apply { clean_apply(&f) } else { ExitCode::SUCCESS }
         }
         Cmd::Notify { ref urgency, ref title, ref body } => {
             watch::notify_interactive(urgency, title, body);
-            return ExitCode::SUCCESS;
+            ExitCode::SUCCESS
         }
         Cmd::Watch { install, snooze } => {
             let r = if install {
@@ -141,76 +233,94 @@ fn main() -> ExitCode {
             } else if let Some(h) = snooze {
                 watch::snooze(h)
             } else {
-                let f: Vec<Finding> = check::CHECKS.iter().flat_map(|c| c()).collect();
-                let w = watch::watch(&f);
-                // growth snapshot runs even if notification state failed
-                w.and(watch::snapshot(&home).map(|_| ()))
+                // each step runs even if an earlier one failed
+                let w = watch::watch(&checks().0);
+                let g = watch::snapshot(&home).map(|_| ());
+                let t = watch::record_metrics();
+                w.and(g).and(t)
             };
             // Always exit 0: a failing unit would report itself as a "failed unit" finding.
             if let Err(e) = r {
                 eprintln!("sysdoctor watch: {e}");
             }
-            return ExitCode::SUCCESS;
+            ExitCode::SUCCESS
         }
-        Cmd::Growth { days } => {
-            return match watch::growth(&home, days) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("growth: {e}");
-                    ExitCode::from(2)
-                }
-            };
+        Cmd::Growth { days } => watch::growth(&home, days).map_or_else(|e| fail("growth", e), |_| ExitCode::SUCCESS),
+        Cmd::Trends => watch::trends().map_or_else(|e| fail("trends", e), |_| ExitCode::SUCCESS),
+        Cmd::Report => {
+            print!("{}", report::report(&checks().0));
+            ExitCode::SUCCESS
         }
-    };
-
-    if cli.json {
-        println!("{}", serde_json::to_string_pretty(&findings).unwrap());
-    } else {
-        render(&findings);
+        Cmd::Startup => {
+            output(&report::startup(), cli.json);
+            ExitCode::SUCCESS
+        }
+        Cmd::Ignore { pattern: None, .. } => {
+            let pats = config::ignores();
+            if pats.is_empty() {
+                println!("Nothing ignored. Add with `sysdoctor ignore <pattern>`.");
+            }
+            pats.iter().for_each(|p| println!("{p}"));
+            ExitCode::SUCCESS
+        }
+        Cmd::Ignore { pattern: Some(p), remove: false } => match config::add_ignore(&p) {
+            Ok(()) => {
+                println!("Ignoring findings matching \"{p}\".");
+                ExitCode::SUCCESS
+            }
+            Err(e) => fail("ignore", e),
+        },
+        Cmd::Ignore { pattern: Some(p), remove: true } => match config::remove_ignore(&p) {
+            Ok(true) => {
+                println!("No longer ignoring \"{p}\".");
+                ExitCode::SUCCESS
+            }
+            Ok(false) => fail("ignore", format!("\"{p}\" is not in the ignore list")),
+            Err(e) => fail("ignore", e),
+        },
+        Cmd::Config => {
+            let path = config::path().unwrap_or_default();
+            let state = if path.exists() { "loaded from" } else { "defaults; override in" };
+            println!("# {state} {}\n", path.display());
+            print!("{}", toml::to_string(config::get()).unwrap_or_default());
+            ExitCode::SUCCESS
+        }
+        Cmd::Tray { install } => {
+            let r = if install { tray::install() } else { tray::run(checks) };
+            r.map_or_else(|e| fail("tray", e), |_| ExitCode::SUCCESS)
+        }
+        Cmd::Completions { shell } => {
+            clap_complete::generate(shell, &mut Cli::command(), "sysdoctor", &mut std::io::stdout());
+            ExitCode::SUCCESS
+        }
+        Cmd::Man => clap_mangen::Man::new(Cli::command()).render(&mut std::io::stdout()).map_or_else(|e| fail("man", e), |_| ExitCode::SUCCESS),
     }
+}
 
-    match cli.cmd {
-        Cmd::Watch { .. } | Cmd::Growth { .. } | Cmd::Notify { .. } | Cmd::Check { bar: true } => unreachable!("returned above"),
-        Cmd::Check { bar: false } => ExitCode::from(findings.iter().map(|f| f.severity).max().unwrap_or(Severity::Ok) as u8),
-        Cmd::Clean { apply } => {
-            if !cli.json {
-                let total: u64 = findings.iter().filter_map(|f| f.bytes).sum();
-                println!("\nreclaimable: {}", human(total));
-            }
-            if !apply {
-                return ExitCode::SUCCESS;
-            }
-            // Only regenerable user paths are auto-trashed; "review" items and system commands never are.
-            let paths: Vec<&PathBuf> = findings
-                .iter()
-                .filter(|f| f.severity == Severity::Ok)
-                .filter_map(|f| match &f.fix {
-                    Some(Fix::Trash(p)) => Some(p),
-                    _ => None,
-                })
-                .flatten()
-                .collect();
-            if paths.is_empty() {
-                println!("Nothing to trash automatically. Run the fix commands above yourself.");
-                return ExitCode::SUCCESS;
-            }
-            println!("\nWill move to trash:");
-            paths.iter().for_each(|p| println!("  {}", p.display()));
-            if !confirm("Proceed?") {
-                return ExitCode::SUCCESS;
-            }
+/// Step 1: trash regenerable user paths (one confirmation). Step 2: offer each cleanup command.
+fn clean_apply(findings: &[Finding]) -> ExitCode {
+    // "review" items (Warn) are never auto-trashed; their commands are offered in step 2.
+    let paths: Vec<&PathBuf> = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Ok)
+        .filter_map(|f| match &f.fix {
+            Some(Fix::Trash(p)) => Some(p),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    if !paths.is_empty() {
+        println!("\nWill move to trash:");
+        paths.iter().for_each(|p| println!("  {}", p.display()));
+        if confirm("Proceed?") {
             match trash::delete_all(&paths) {
-                Ok(()) => {
-                    println!("Trashed {} paths. Restore from trash if needed.", paths.len());
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    eprintln!("trash failed: {e}");
-                    ExitCode::from(2)
-                }
+                Ok(()) => println!("Trashed {} paths. Empty the trash to actually free the space.", paths.len()),
+                Err(e) => return fail("trash failed", e),
             }
         }
     }
+    run_fixes(findings.iter());
+    ExitCode::SUCCESS
 }
 
 #[cfg(test)]

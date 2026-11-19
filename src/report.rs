@@ -1,0 +1,203 @@
+//! `report`: privacy-scrubbed Markdown summary for forums/bug reports. `startup`: what slows boot, login, shell.
+use crate::finding::{human, run, run_any, Finding, Severity};
+use std::fs;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+fn os_name() -> String {
+    fs::read_to_string("/etc/os-release")
+        .unwrap_or_default()
+        .lines()
+        .find_map(|l| l.strip_prefix("PRETTY_NAME="))
+        .map(|s| s.trim_matches('"').to_string())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+fn field(path: &str, key: &str) -> Option<String> {
+    fs::read_to_string(path).ok()?.lines().find_map(|l| Some(l.strip_prefix(key)?.trim_start_matches([' ', '\t', ':']).trim().to_string()))
+}
+
+fn uptime() -> String {
+    let secs: f64 = fs::read_to_string("/proc/uptime").ok().and_then(|s| s.split_whitespace().next()?.parse().ok()).unwrap_or(0.0);
+    let h = (secs / 3600.0) as u64;
+    format!("{}d {}h", h / 24, h % 24)
+}
+
+fn gpus() -> Vec<String> {
+    run("lspci", &[])
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.contains("VGA") || l.contains("3D controller"))
+        .filter_map(|l| l.split(": ").nth(1).map(String::from))
+        .collect()
+}
+
+/// Replace identifying strings: home path, user name, host name, IPv4 and MAC addresses.
+pub fn scrub(text: &str, home: &str, user: &str, host: &str) -> String {
+    let mut s = text.to_string();
+    // longest first, so a host name containing the user name is replaced whole
+    let mut names = [(home, "~"), (user, "<user>"), (host, "<host>")];
+    names.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
+    for (needle, repl) in names {
+        if needle.len() >= 2 {
+            s = s.replace(needle, repl);
+        }
+    }
+    let ip = |t: &str| {
+        let p: Vec<&str> = t.split('.').collect();
+        p.len() == 4 && p.iter().all(|x| !x.is_empty() && x.len() <= 3 && x.chars().all(|c| c.is_ascii_digit()))
+    };
+    let mac = |t: &str| {
+        let p: Vec<&str> = t.split(':').collect();
+        p.len() == 6 && p.iter().all(|x| x.len() == 2 && x.chars().all(|c| c.is_ascii_hexdigit()))
+    };
+    s.lines()
+        .map(|line| {
+            // keep separators; only whole tokens (trimmed of punctuation) are tested
+            line.split(' ')
+                .map(|tok| {
+                    let core = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != ':');
+                    let core = core.trim_end_matches(['.', ':']);
+                    if ip(core) {
+                        tok.replace(core, "<ip>")
+                    } else if mac(core) {
+                        tok.replace(core, "<mac>")
+                    } else {
+                        tok.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+pub fn report(findings: &[Finding]) -> String {
+    let mut o = String::from("## sysdoctor report\n\n");
+    let mem = field("/proc/meminfo", "MemTotal").and_then(|s| s.split_whitespace().next()?.parse::<u64>().ok()).unwrap_or(0) * 1024;
+    let desktop = format!(
+        "{} ({})",
+        std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "none".into()),
+        std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "?".into())
+    );
+    for (k, v) in [
+        ("OS", os_name()),
+        ("Kernel", run("uname", &["-r"]).unwrap_or_default().trim().to_string()),
+        ("Desktop", desktop),
+        ("Uptime", uptime()),
+        ("CPU", field("/proc/cpuinfo", "model name").unwrap_or_default()),
+        ("Memory", human(mem)),
+        ("GPU", gpus().join("; ")),
+    ] {
+        o += &format!("- **{k}:** {v}\n");
+    }
+    o += "\n### Disks\n\n";
+    for (dev, mp) in crate::check::mounts() {
+        if let Ok(s) = nix::sys::statvfs::statvfs(mp.as_str()) {
+            let f = s.fragment_size();
+            let (size, avail) = (s.blocks() * f, s.blocks_available() * f);
+            o += &format!("- `{mp}` ({dev}): {} of {} free\n", human(avail), human(size));
+        }
+    }
+    let (bad, good): (Vec<&Finding>, Vec<&Finding>) = findings.iter().partition(|f| f.severity != Severity::Ok);
+    o += "\n### Problems\n\n";
+    if bad.is_empty() {
+        o += "None found.\n";
+    }
+    for f in bad {
+        o += &format!("- **{:?}:** {}\n", f.severity, f.title);
+        for l in f.detail.lines().filter(|l| !l.is_empty()) {
+            o += &format!("  - {l}\n");
+        }
+    }
+    o += "\n### Passing checks\n\n";
+    o += &good.iter().map(|f| f.title.as_str()).collect::<Vec<_>>().join(" · ");
+    o += "\n";
+    let home = std::env::var("HOME").unwrap_or_default();
+    let user = std::env::var("USER").unwrap_or_default();
+    let host = fs::read_to_string("/etc/hostname").unwrap_or_default().trim().to_string();
+    scrub(&o, &home, &user, &host)
+}
+
+// ---- startup ----
+
+fn top_lines(s: &str, n: usize) -> String {
+    s.lines().take(n).map(str::trim).collect::<Vec<_>>().join("\n")
+}
+
+/// Median wall time of `shell -i -c exit` over 3 runs, or None on failure/timeout.
+fn shell_startup(shell: &str) -> Option<Duration> {
+    let mut times = vec![];
+    for _ in 0..3 {
+        let start = Instant::now();
+        let mut child = Command::new(shell).args(["-i", "-c", "exit"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok()?;
+        loop {
+            if child.try_wait().ok()?.is_some() {
+                break;
+            }
+            if start.elapsed() > Duration::from_secs(10) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        times.push(start.elapsed());
+    }
+    times.sort();
+    Some(times[1])
+}
+
+fn autostart() -> Vec<String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let mut names = vec![];
+    for dir in ["/etc/xdg/autostart".to_string(), format!("{home}/.config/autostart")] {
+        for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+            let text = fs::read_to_string(e.path()).unwrap_or_default();
+            let hidden = text.lines().any(|l| l.trim() == "Hidden=true" || l.trim() == "X-GNOME-Autostart-enabled=false");
+            if !hidden {
+                names.push(e.file_name().to_string_lossy().trim_end_matches(".desktop").to_string());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+pub fn startup() -> Vec<Finding> {
+    let mut out = vec![];
+    if let Some(total) = run("systemd-analyze", &[]) {
+        let line = total.lines().next().unwrap_or("").to_string();
+        let blame = run("systemd-analyze", &["blame", "--no-pager"]).unwrap_or_default();
+        out.push(Finding::ok("startup-boot", line).detail(format!("Slowest units:\n{}", top_lines(&blame, 8))).cmd("systemd-analyze critical-chain"));
+    }
+    if let Some(blame) = run_any("systemd-analyze", &["--user", "blame", "--no-pager"]).filter(|s| !s.trim().is_empty()) {
+        out.push(Finding::ok("startup-user", "Slowest user (login) units").detail(top_lines(&blame, 5)));
+    }
+    let auto = autostart();
+    out.push(Finding::ok("startup-autostart", format!("{} desktop autostart entries", auto.len())).detail(auto.join(", ")));
+    if let Ok(shell) = std::env::var("SHELL") {
+        let name = shell.rsplit('/').next().unwrap_or(&shell).to_string();
+        out.push(match shell_startup(&shell) {
+            Some(d) if d > Duration::from_millis(300) => Finding::new("startup-shell", Severity::Warn, format!("{name} interactive startup {} ms", d.as_millis()))
+                .detail("Every new terminal waits this long. Profile your rc file (zsh: add `zmodload zsh/zprof` at the top, `zprof` at the end)."),
+            Some(d) => Finding::ok("startup-shell", format!("{name} interactive startup {} ms", d.as_millis())),
+            None => Finding::skipped("startup-shell", format!("{name} did not exit within 10s")),
+        });
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrub_identifiers() {
+        let t = "path /home/fed/x on host fedbox, ip 192.168.1.20, gw (10.0.0.1) mac aa:bb:cc:dd:ee:ff: user fed\nversion 6.8.0 ok";
+        let s = scrub(t, "/home/fed", "fed", "fedbox");
+        assert_eq!(s, "path ~/x on host <host>, ip <ip>, gw (<ip>) mac <mac>: user <user>\nversion 6.8.0 ok");
+    }
+}

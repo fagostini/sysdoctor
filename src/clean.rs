@@ -7,16 +7,24 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-pub const SCANNERS: &[fn(&Path) -> Vec<Finding>] = &[projects, ai_caches, user_trash, docker, journal, snap, flatpak];
+pub const SCANNERS: &[fn(&Path) -> Vec<Finding>] =
+    &[projects, pkg_caches, ai_caches, stale_caches, user_trash, apt_cache, old_kernels, docker, journal, snap, flatpak];
 
-const STALE: Duration = Duration::from_secs(30 * 86400);
+const MIN: u64 = 50 << 20; // ignore anything smaller than 50M
+
 
 /// Real disk usage: st_blocks (handles sparse), hardlinks once, no symlink follow, no mount crossing.
 pub fn du(root: &Path) -> u64 {
-    let Ok(meta) = fs::symlink_metadata(root) else { return 0 };
+    du_newest(root).0
+}
+
+/// (disk usage, newest mtime in Unix seconds) of a tree.
+pub fn du_newest(root: &Path) -> (u64, i64) {
+    let Ok(meta) = fs::symlink_metadata(root) else { return (0, 0) };
     let dev = meta.dev();
     let mut seen = HashSet::new();
     let mut total = 0;
+    let mut newest = 0;
     let mut stack = vec![root.to_path_buf()];
     while let Some(p) = stack.pop() {
         let Ok(m) = fs::symlink_metadata(&p) else { continue };
@@ -24,11 +32,20 @@ pub fn du(root: &Path) -> u64 {
             continue;
         }
         total += m.blocks() * 512;
+        newest = newest.max(m.mtime());
         if m.is_dir() {
             stack.extend(fs::read_dir(&p).into_iter().flatten().flatten().map(|e| e.path()));
         }
     }
-    total
+    (total, newest)
+}
+
+/// Measure several trees in parallel (they are usually on one SSD, so threads help).
+fn du_many(paths: &[PathBuf]) -> Vec<(u64, i64)> {
+    std::thread::scope(|s| {
+        let hs: Vec<_> = paths.iter().map(|p| s.spawn(move || du_newest(p))).collect();
+        hs.into_iter().map(|h| h.join().unwrap_or((0, 0))).collect()
+    })
 }
 
 /// Newest mtime of a project's direct children, ignoring the artifact dir and .git.
@@ -46,7 +63,7 @@ fn last_touched(project: &Path, artifact: &str) -> Option<SystemTime> {
 
 pub fn is_stale(project: &Path, artifact: &str, now: SystemTime) -> bool {
     last_touched(project, artifact)
-        .is_some_and(|t| now.duration_since(t).unwrap_or_default() > STALE)
+        .is_some_and(|t| now.duration_since(t).unwrap_or_default() > Duration::from_secs(crate::config::get().stale_days * 86400))
 }
 
 fn git_dirty(dir: &Path) -> bool {
@@ -106,6 +123,127 @@ fn projects(home: &Path) -> Vec<Finding> {
     out
 }
 
+/// Package manager download caches: always regenerable, so --apply may trash them.
+const PKG_CACHES: &[(&str, &str)] = &[
+    (".cache/pip", "pip cache"),
+    (".cargo/registry/cache", "cargo crate downloads"),
+    (".cargo/registry/src", "cargo unpacked crate sources"),
+    (".npm/_cacache", "npm cache"),
+    (".cache/yarn", "yarn cache"),
+    (".local/share/pnpm/store", "pnpm store"),
+    (".cache/go-build", "Go build cache"),
+    (".gradle/caches", "Gradle cache"),
+    (".cache/thumbnails", "thumbnail cache"),
+];
+
+fn pkg_caches(home: &Path) -> Vec<Finding> {
+    let paths: Vec<PathBuf> = PKG_CACHES.iter().map(|(r, _)| home.join(r)).collect();
+    let sizes = du_many(&paths);
+    PKG_CACHES
+        .iter()
+        .zip(paths)
+        .zip(sizes)
+        .filter(|(_, (b, _))| *b >= MIN)
+        .map(|(((rel, label), p), (b, _))| Finding {
+            id: "pkg-cache",
+            severity: Severity::Ok,
+            title: format!("{label} ~/{rel} (regenerable)"),
+            detail: String::new(),
+            bytes: Some(b),
+            fix: Some(Fix::Trash(vec![p])),
+        })
+        .collect()
+}
+
+/// ~/.cache subfolders nothing has written to in `cache_stale_days`. Review items: apps sometimes keep state there.
+fn stale_caches(home: &Path) -> Vec<Finding> {
+    let cache = home.join(".cache");
+    let covered = ["pip", "yarn", "go-build", "thumbnails", "huggingface", "torch"];
+    let paths: Vec<PathBuf> = fs::read_dir(&cache)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !covered.iter().any(|c| e.file_name() == *c))
+        .map(|e| e.path())
+        .collect();
+    let days = crate::config::get().cache_stale_days;
+    let cutoff = SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) - days as i64 * 86400;
+    let mut stale: Vec<(PathBuf, u64)> =
+        paths.iter().zip(du_many(&paths)).filter(|(_, (b, newest))| *b >= MIN && *newest < cutoff).map(|(p, (b, _))| (p.clone(), b)).collect();
+    if stale.is_empty() {
+        return vec![];
+    }
+    stale.sort_by_key(|(_, b)| std::cmp::Reverse(*b));
+    let total = stale.iter().map(|(_, b)| b).sum();
+    let detail = stale.iter().map(|(p, b)| format!("{:>8}  {}", human(*b), p.display())).collect::<Vec<_>>().join("\n");
+    let cmd = format!("gio trash {}", stale.iter().map(|(p, _)| format!("'{}'", p.display())).collect::<Vec<_>>().join(" "));
+    vec![Finding {
+        id: "stale-cache",
+        severity: Severity::Warn,
+        title: format!("{} ~/.cache folders unused for {days}+ days (review)", stale.len()),
+        detail,
+        bytes: Some(total),
+        fix: Some(Fix::Command(cmd)),
+    }]
+}
+
+fn apt_cache(_: &Path) -> Vec<Finding> {
+    let b = du(Path::new("/var/cache/apt/archives"));
+    if b < MIN {
+        return vec![];
+    }
+    let mut f = Finding::new("apt-cache", Severity::Ok, "Downloaded .deb packages in /var/cache/apt").cmd("sudo apt clean");
+    f.bytes = Some(b);
+    vec![f]
+}
+
+/// Installed packages built for a kernel version, from `dpkg-query -W -f='${db:Status-Abbrev}${Package}\n'` output.
+pub fn kernel_packages<'a>(dpkg: &'a str, version: &str) -> Vec<&'a str> {
+    let base = version.trim_end_matches("-generic").trim_end_matches("-lowlatency");
+    dpkg.lines()
+        .filter_map(|l| l.strip_prefix("ii "))
+        .map(str::trim)
+        .filter(|p| p.starts_with("linux-") && (p.ends_with(&format!("-{base}")) || p.contains(&format!("-{base}-"))))
+        .collect()
+}
+
+/// Kernels to remove from a version-sorted list: everything except the newest two and the running one.
+/// Two, so a bad new kernel always leaves a known-good fallback in the boot menu.
+pub fn removable_kernels(sorted: &[String], running: &str) -> Vec<String> {
+    let keep_from = sorted.len().saturating_sub(2);
+    sorted[..keep_from].iter().filter(|k| *k != running).cloned().collect()
+}
+
+fn old_kernels(_: &Path) -> Vec<Finding> {
+    let running = run("uname", &["-r"]).unwrap_or_default().trim().to_string();
+    let old = removable_kernels(&crate::security::installed_kernels(), &running);
+    let Some(dpkg) = (!old.is_empty()).then(|| run("dpkg-query", &["-W", "-f=${db:Status-Abbrev}${Package}\n", "linux-*"])).flatten() else {
+        return vec![];
+    };
+    let pkgs: Vec<&str> = old.iter().flat_map(|k| kernel_packages(&dpkg, k)).collect();
+    if pkgs.is_empty() {
+        return vec![];
+    }
+    let bytes: u64 = old
+        .iter()
+        .map(|k| {
+            let boot: u64 = fs::read_dir("/boot")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(k.as_str()))
+                .map(|e| du(&e.path()))
+                .sum();
+            boot + du(&Path::new("/lib/modules").join(k))
+        })
+        .sum();
+    let mut f = Finding::new("old-kernels", Severity::Ok, format!("{} old kernels (keeping the newest two and running {running})", old.len()))
+        .detail(old.join(", "))
+        .cmd(format!("sudo apt purge {}", pkgs.join(" ")));
+    f.bytes = Some(bytes);
+    vec![f]
+}
+
 fn ai_caches(home: &Path) -> Vec<Finding> {
     [".cache/huggingface", ".ollama/models", ".cache/torch"]
         .iter()
@@ -150,11 +288,12 @@ fn journal(_: &Path) -> Vec<Finding> {
     // "Archived and active journals take up 1.0G in the file system."
     let Some(s) = run("journalctl", &["--disk-usage"]) else { return vec![] };
     let Some(b) = s.split("take up ").nth(1).and_then(|r| parse_size(r.split_whitespace().next()?)) else { return vec![] };
-    let keep = 500u64 << 20;
+    let keep = crate::config::get().journal_max_mb << 20;
     if b <= keep {
         return vec![];
     }
-    let mut f = Finding::new("journal", Severity::Ok, "systemd journal over 500M").cmd("sudo journalctl --vacuum-size=500M");
+    let mb = crate::config::get().journal_max_mb;
+    let mut f = Finding::new("journal", Severity::Ok, format!("systemd journal over {mb}M")).cmd(format!("sudo journalctl --vacuum-size={mb}M"));
     f.bytes = Some(b - keep);
     vec![f]
 }
@@ -229,6 +368,26 @@ mod tests {
         let dir_only = fs::symlink_metadata(d.path()).unwrap().blocks() * 512;
         let link = fs::symlink_metadata(d.path().join("link")).unwrap().blocks() * 512;
         assert_eq!(du(d.path()), dir_only + one + link);
+    }
+
+    #[test]
+    fn kernel_keep_policy() {
+        let k = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let all = k(&["6.8.0-38", "6.8.0-100", "6.8.0-124", "6.8.0-149"]);
+        assert_eq!(removable_kernels(&all, "6.8.0-149"), k(&["6.8.0-38", "6.8.0-100"]));
+        assert_eq!(removable_kernels(&all, "6.8.0-38"), k(&["6.8.0-100"])); // booted into an old one: keep it
+        assert!(removable_kernels(&k(&["6.8.0-149"]), "6.8.0-149").is_empty());
+    }
+
+    #[test]
+    fn kernel_pkg_match() {
+        let dpkg = "ii linux-image-6.8.0-100-generic\nii linux-modules-6.8.0-100-generic\nii linux-headers-6.8.0-100\n\
+                    ii linux-headers-6.8.0-100-generic\nii linux-image-6.8.0-1000-generic\nrc linux-image-6.8.0-99-generic\nii linux-firmware\n";
+        assert_eq!(
+            kernel_packages(dpkg, "6.8.0-100-generic"),
+            ["linux-image-6.8.0-100-generic", "linux-modules-6.8.0-100-generic", "linux-headers-6.8.0-100", "linux-headers-6.8.0-100-generic"]
+        );
+        assert!(kernel_packages(dpkg, "6.8.0-99-generic").is_empty()); // only config files left
     }
 
     #[test]

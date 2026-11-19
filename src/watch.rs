@@ -80,10 +80,16 @@ pub fn notify_interactive(urgency: &str, title: &str, body: &str) {
 }
 
 fn open_report() {
+    open_in_terminal("check");
+}
+
+/// Run `sysdoctor <args>` in a new terminal window, which waits for Enter before closing.
+pub fn open_in_terminal(args: &str) {
     let Ok(exe) = std::env::current_exe() else { return };
     // One string after -e: understood by terminator, gnome-terminal and xterm alike.
-    let cmd = format!("sh -c '\"{}\" check; printf \"\\nPress Enter to close\"; read _'", exe.display());
+    let cmd = format!("sh -c '\"{}\" {args}; printf \"\\nPress Enter to close\"; read _'", exe.display());
     // ponytail: Debian/Ubuntu/Mint alternatives link; add a config knob if other distros need it.
+    // wait: when called from the notification's transient unit, exiting early would kill the terminal
     let _ = Command::new("x-terminal-emulator").args(["-e", &cmd]).status();
 }
 
@@ -131,6 +137,80 @@ pub fn install() -> io::Result<()> {
     run("systemctl", &["--user", "enable", "--now", "sysdoctor.timer"]).ok_or(io::Error::other("enabling timer failed"))?;
     println!("Installed {}/sysdoctor.{{service,timer}}; runs hourly.", dir.display());
     Ok(())
+}
+
+// ---- trends: slow-moving health metrics, one sample per day ----
+
+#[derive(Serialize, Deserialize)]
+pub struct Metrics {
+    pub ts: u64,
+    pub values: BTreeMap<String, f64>,
+}
+
+fn metrics() -> BTreeMap<String, f64> {
+    let mut m: BTreeMap<String, f64> =
+        crate::check::battery_levels().into_iter().map(|(n, r)| (format!("{n} battery health %"), r)).collect();
+    // SMART attributes need root; as a user this silently records nothing.
+    for d in crate::check::block_disks() {
+        let Some(j) = crate::finding::run_any("smartctl", &["-j", "-A", &format!("/dev/{d}")]) else { continue };
+        let v: serde_json::Value = serde_json::from_str(&j).unwrap_or_default();
+        if let Some(w) = v["nvme_smart_health_information_log"]["percentage_used"].as_f64() {
+            m.insert(format!("{d} wear %"), w);
+        }
+        let realloc = v["ata_smart_attributes"]["table"].as_array().and_then(|t| t.iter().find(|a| a["id"] == 5));
+        if let Some(r) = realloc.and_then(|a| a["raw"]["value"].as_f64()) {
+            m.insert(format!("{d} reallocated sectors"), r);
+        }
+    }
+    m
+}
+
+/// Append today's metrics unless already recorded in the last 20h.
+pub fn record_metrics() -> io::Result<()> {
+    let path = state_dir()?.join("trends.jsonl");
+    let last = load_jsonl::<Metrics>(&path).pop();
+    if last.is_some_and(|s| now().saturating_sub(s.ts) < 20 * 3600) {
+        return Ok(());
+    }
+    let values = metrics();
+    if values.is_empty() {
+        return Ok(());
+    }
+    let mut f = fs::OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(f, "{}", serde_json::to_string(&Metrics { ts: now(), values })?)
+}
+
+/// Per metric: (first value, first ts, last value, last ts).
+pub fn trend_table(samples: &[Metrics]) -> BTreeMap<String, (f64, u64, f64, u64)> {
+    let mut t: BTreeMap<String, (f64, u64, f64, u64)> = BTreeMap::new();
+    for s in samples {
+        for (k, v) in &s.values {
+            t.entry(k.clone()).and_modify(|e| (e.2, e.3) = (*v, s.ts)).or_insert((*v, s.ts, *v, s.ts));
+        }
+    }
+    t
+}
+
+pub fn trends() -> io::Result<()> {
+    record_metrics()?;
+    let samples = load_jsonl::<Metrics>(&state_dir()?.join("trends.jsonl"));
+    if samples.len() < 2 {
+        println!("Not enough history yet ({} sample). The timer (`sysdoctor watch --install`) records one daily.", samples.len());
+        println!("Disk wear needs root: run the timer's command once as `sudo sysdoctor trends` to include it.");
+        return Ok(());
+    }
+    for (k, (v0, t0, v1, t1)) in trend_table(&samples) {
+        let days = (t1 - t0) as f64 / 86400.0;
+        let rate = if days >= 1.0 { format!("  ({:+.2} per 30 days)", (v1 - v0) / days * 30.0) } else { String::new() };
+        println!("{k:<34} {v0:>7.1} -> {v1:>7.1} over {days:.0} days{rate}");
+    }
+    Ok(())
+}
+
+fn load_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
+    fs::File::open(path)
+        .map(|f| io::BufReader::new(f).lines().map_while(Result::ok).filter_map(|l| serde_json::from_str(&l).ok()).collect())
+        .unwrap_or_default()
 }
 
 // ---- growth tracking ----
@@ -247,6 +327,13 @@ mod tests {
         let (u, t, body) = summary(&[&a, &b]);
         assert_eq!((u, t.as_str()), ("critical", "sysdoctor: 2 new problems"));
         assert_eq!(body, "• Clock not NTP-synced\n• /dev/sda SMART health FAILED");
+    }
+
+    #[test]
+    fn trend_first_last() {
+        let s = |ts, v: f64| Metrics { ts, values: [("BAT1 battery health %".to_string(), v)].into() };
+        let t = trend_table(&[s(0, 85.0), s(86400, 84.0), s(30 * 86400, 82.0)]);
+        assert_eq!(t["BAT1 battery health %"], (85.0, 0, 82.0, 30 * 86400));
     }
 
     #[test]
