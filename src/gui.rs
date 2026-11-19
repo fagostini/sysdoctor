@@ -28,6 +28,8 @@ struct Ui {
     term: vte4::Terminal,
     term_pane: gtk::Box,
     running: Rc<Cell<bool>>,
+    /// Ticks the user changed, by "id title", kept across refreshes.
+    picked: Rc<RefCell<std::collections::HashMap<String, bool>>>,
     checks: Checks,
     cleanups: Cleanups,
 }
@@ -139,7 +141,7 @@ fn build(app: &gtk::Application, checks: Checks, cleanups: Cleanups) {
     root.append(&status);
     window.set_child(Some(&root));
 
-    let ui = Ui { window, health, clean, clean_bar, status, spinner, refresh, report: Rc::default(), term, term_pane, running: Rc::default(), checks, cleanups };
+    let ui = Ui { window, health, clean, clean_bar, status, spinner, refresh, report: Rc::default(), term, term_pane, running: Rc::default(), picked: Rc::default(), checks, cleanups };
     let u = ui.clone();
     hide.connect_clicked(move |_| u.term_pane.set_visible(u.running.get()));
     let u = ui.clone();
@@ -169,6 +171,13 @@ impl Ui {
 
     fn reload(&self) {
         self.busy("Checking…");
+        // drop the old cleanup list right away: its items may be gone already
+        clear(&self.clean_bar);
+        clear(&self.clean);
+        let wait = label("Scanning for reclaimable space…");
+        wait.set_selectable(false);
+        wait.add_css_class("dim-label");
+        self.clean.append(&wait);
         let ui = self.clone();
         glib::spawn_future_local(async move {
             // both start now; cleanup walks $HOME and is slower, so health shows first
@@ -324,6 +333,7 @@ impl Ui {
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         let all: u64 = items.iter().filter_map(|f| f.bytes).sum();
         let total = label("");
+        total.set_selectable(false);
         total.set_hexpand(true);
         let go = gtk::Button::with_label("Clean selected…");
         go.add_css_class("suggested-action");
@@ -334,7 +344,13 @@ impl Ui {
         let mut picks = vec![];
         for f in items {
             // regenerable (Ok) pre-ticked; "review" (Warn) items are opt-in
-            let c = gtk::CheckButton::builder().active(f.severity == Severity::Ok).valign(gtk::Align::Center).build();
+            let key = format!("{} {}", f.id, f.title);
+            let on = self.picked.borrow().get(&key).copied().unwrap_or(f.severity == Severity::Ok);
+            let c = gtk::CheckButton::builder().active(on).valign(gtk::Align::Center).build();
+            let picked = self.picked.clone();
+            c.connect_toggled(move |c| {
+                picked.borrow_mut().insert(key.clone(), c.is_active());
+            });
             self.clean.append(&self.card(&f, Some(&c), false));
             picks.push((c, f));
         }
