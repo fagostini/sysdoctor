@@ -72,7 +72,7 @@ sudo apt install libgtk-4-dev libvte-2.91-gtk4-dev
 cargo install --path . --features gui
 ```
 
-**As a .deb** (Debian, Ubuntu, Mint), which also installs the man page and shell completions:
+**As a .deb** (Ubuntu 24.04, Mint 22, Debian 13 or newer), which includes the report window, an app-menu entry, the man page and shell completions. Download it from [Releases](https://github.com/fagostini/sysdoctor/releases), or build it:
 
 ```sh
 cargo install cargo-deb

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=sysdoctor
+GenericName=System Health
+Comment=Health report and cleanup advisor
+Exec=sysdoctor gui
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Monitor;
+Keywords=health;cleanup;disk;battery;backup;
