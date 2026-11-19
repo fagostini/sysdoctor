@@ -428,3 +428,7 @@ cargo run -- check
 cargo run --features gui -- gui
 ./scripts/deb.sh # build the .deb
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).

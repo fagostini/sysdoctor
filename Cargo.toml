@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 description = "Linux health check and cleanup advisor"
 license = "MIT"
+repository = "https://github.com/fagostini/sysdoctor"
 readme = "README.md"
 authors = ["Federico Agostini"]
 
@@ -40,6 +41,7 @@ caches, old kernels, journal). Optional hourly timer notifies only on new proble
 assets = [
     ["target/release/sysdoctor", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/sysdoctor/", "644"],
+    ["LICENSE", "usr/share/doc/sysdoctor/copyright", "644"],
     ["target/assets/sysdoctor.1", "usr/share/man/man1/", "644"],
     ["target/assets/sysdoctor.bash", "usr/share/bash-completion/completions/sysdoctor", "644"],
     ["target/assets/_sysdoctor", "usr/share/zsh/vendor-completions/", "644"],
