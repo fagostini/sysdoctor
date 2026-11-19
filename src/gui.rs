@@ -13,7 +13,7 @@ type Cleanups = fn() -> Vec<Finding>;
 
 pub const APP_ID: &str = "io.github.sysdoctor";
 
-const CSS: &str = ".crit { color: #e01b24; } .warn { color: #e5a50a; } .ok { color: #2ec27e; } .title { font-weight: bold; } .cmd { font-family: monospace; background: alpha(currentColor, 0.08); border: 1px solid alpha(currentColor, 0.15); border-radius: 6px; padding: 6px 8px; } .ignored { opacity: 0.6; } checkbutton check:not(:checked) { border: 1px solid alpha(currentColor, 0.5); } .caption { font-size: smaller; font-weight: bold; opacity: 0.7; }";
+const CSS: &str = ".crit { color: #e01b24; } .warn { color: #e5a50a; } .ok { color: #2ec27e; } .title { font-weight: bold; } .cmd { font-family: monospace; background: alpha(currentColor, 0.08); border: 1px solid alpha(currentColor, 0.15); border-radius: 6px; padding: 6px 8px; } .ignored { opacity: 0.6; } checkbutton check:not(:checked) { outline: 1px solid alpha(currentColor, 0.55); outline-offset: -2px; border-radius: 3px; } .caption { font-size: smaller; font-weight: bold; opacity: 0.7; }";
 
 #[derive(Clone)]
 struct Ui {
