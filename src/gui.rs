@@ -13,13 +13,14 @@ type Cleanups = fn() -> Vec<Finding>;
 
 pub const APP_ID: &str = "io.github.sysdoctor";
 
-const CSS: &str = ".crit { color: #e01b24; } .warn { color: #e5a50a; } .ok { color: #2ec27e; } .title { font-weight: bold; } .cmd { font-family: monospace; background: alpha(currentColor, 0.08); border: 1px solid alpha(currentColor, 0.15); border-radius: 6px; padding: 6px 8px; } .ignored { opacity: 0.6; } .caption { font-size: smaller; font-weight: bold; opacity: 0.7; }";
+const CSS: &str = ".crit { color: #e01b24; } .warn { color: #e5a50a; } .ok { color: #2ec27e; } .title { font-weight: bold; } .cmd { font-family: monospace; background: alpha(currentColor, 0.08); border: 1px solid alpha(currentColor, 0.15); border-radius: 6px; padding: 6px 8px; } .ignored { opacity: 0.6; } checkbutton check:not(:checked) { border: 1px solid alpha(currentColor, 0.5); } .caption { font-size: smaller; font-weight: bold; opacity: 0.7; }";
 
 #[derive(Clone)]
 struct Ui {
     window: gtk::ApplicationWindow,
     health: gtk::Box,
     clean: gtk::Box,
+    clean_bar: gtk::Box,
     status: gtk::Label,
     spinner: gtk::Spinner,
     refresh: gtk::Button,
@@ -98,13 +99,21 @@ fn build(app: &gtk::Application, checks: Checks, cleanups: Cleanups) {
     header.set_title_widget(Some(&gtk::StackSwitcher::builder().stack(&stack).build()));
     window.set_titlebar(Some(&header));
 
-    let page = |name: &str, title: &str| {
+    // header: stays put above the scrolling list
+    let page = |name: &str, title: &str, header: &gtk::Box| {
         let b = vbox(10, 14);
         let sc = gtk::ScrolledWindow::builder().child(&b).vexpand(true).hscrollbar_policy(gtk::PolicyType::Never).build();
-        stack.add_titled(&sc, Some(name), title);
+        let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        outer.append(header);
+        outer.append(&sc);
+        stack.add_titled(&outer, Some(name), title);
         b
     };
-    let (health, clean) = (page("health", "Health"), page("clean", "Cleanup"));
+    let clean_bar = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    clean_bar.set_margin_start(14);
+    clean_bar.set_margin_end(14);
+    clean_bar.set_margin_top(10);
+    let (health, clean) = (page("health", "Health", &gtk::Box::new(gtk::Orientation::Vertical, 0)), page("clean", "Cleanup", &clean_bar));
     let status = gtk::Label::builder().xalign(0.0).margin_start(14).margin_end(14).margin_top(6).margin_bottom(6).build();
     status.add_css_class("dim-label");
     let term = vte4::Terminal::builder().vexpand(true).scrollback_lines(5000).build();
@@ -130,7 +139,7 @@ fn build(app: &gtk::Application, checks: Checks, cleanups: Cleanups) {
     root.append(&status);
     window.set_child(Some(&root));
 
-    let ui = Ui { window, health, clean, status, spinner, refresh, report: Rc::default(), term, term_pane, running: Rc::default(), checks, cleanups };
+    let ui = Ui { window, health, clean, clean_bar, status, spinner, refresh, report: Rc::default(), term, term_pane, running: Rc::default(), checks, cleanups };
     let u = ui.clone();
     hide.connect_clicked(move |_| u.term_pane.set_visible(u.running.get()));
     let u = ui.clone();
@@ -313,19 +322,35 @@ impl Ui {
         clear(&self.clean);
         items.sort_by_key(|f| std::cmp::Reverse(f.bytes.unwrap_or(0)));
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-        let total = label(&format!("Reclaimable: {}. Unticked items need review first.", human(items.iter().filter_map(|f| f.bytes).sum())));
+        let all: u64 = items.iter().filter_map(|f| f.bytes).sum();
+        let total = label("");
         total.set_hexpand(true);
         let go = gtk::Button::with_label("Clean selected…");
         go.add_css_class("suggested-action");
         bar.append(&total);
         bar.append(&go);
-        self.clean.append(&bar);
+        clear(&self.clean_bar);
+        self.clean_bar.append(&bar);
         let mut picks = vec![];
         for f in items {
             // regenerable (Ok) pre-ticked; "review" (Warn) items are opt-in
             let c = gtk::CheckButton::builder().active(f.severity == Severity::Ok).valign(gtk::Align::Center).build();
             self.clean.append(&self.card(&f, Some(&c), false));
             picks.push((c, f));
+        }
+        let picks = Rc::new(picks);
+        let update = {
+            let (picks, total, go) = (picks.clone(), total.clone(), go.clone());
+            move || {
+                let sel: u64 = picks.iter().filter(|(c, _)| c.is_active()).filter_map(|(_, f)| f.bytes).sum();
+                total.set_markup(&format!("Selected: <b>{}</b> of {} reclaimable. Unticked items need review first.", human(sel), human(all)));
+                go.set_sensitive(picks.iter().any(|(c, _)| c.is_active()));
+            }
+        };
+        update();
+        for (c, _) in picks.iter() {
+            let update = update.clone();
+            c.connect_toggled(move |_| update());
         }
         let ui = self.clone();
         go.connect_clicked(move |_| {
