@@ -179,11 +179,9 @@ fn run_fixes<'a>(findings: impl Iterator<Item = &'a Finding>) {
     }
 }
 
-/// All checks minus ignored ones; returns how many were ignored.
-fn checks() -> (Vec<Finding>, usize) {
-    let mut f: Vec<Finding> = check::CHECKS.iter().flat_map(|c| c()).collect();
-    let n = config::apply_ignores(&mut f);
-    (f, n)
+/// All checks, split into (active, ignored).
+fn checks() -> (Vec<Finding>, Vec<Finding>) {
+    config::split_ignored(check::CHECKS.iter().flat_map(|c| c()).collect())
 }
 
 /// Cleanup findings minus ignored ones, biggest first.
@@ -219,8 +217,8 @@ fn main() -> ExitCode {
         Cmd::Check { bar: false, fix } => {
             let (f, ignored) = checks();
             output(&f, cli.json);
-            if ignored > 0 && !cli.json {
-                println!("\n({ignored} ignored, see `sysdoctor ignore`)");
+            if !ignored.is_empty() && !cli.json {
+                println!("\n({} ignored, see `sysdoctor ignore`)", ignored.len());
             }
             if fix {
                 run_fixes(f.iter().filter(|f| f.severity != Severity::Ok));

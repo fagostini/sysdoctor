@@ -225,7 +225,7 @@ impl ksni::Tray for SysTray {
 }
 
 /// Run the tray until Quit. Refuses to start a second instance.
-pub fn run(checks: fn() -> (Vec<Finding>, usize)) -> io::Result<()> {
+pub fn run(checks: fn() -> (Vec<Finding>, Vec<Finding>)) -> io::Result<()> {
     let state = xdg("XDG_STATE_HOME", ".local/state").ok_or(io::ErrorKind::NotFound)?.join("sysdoctor");
     fs::create_dir_all(&state)?;
     let lock = fs::OpenOptions::new().create(true).truncate(false).write(true).open(state.join("tray.lock"))?;
@@ -254,7 +254,7 @@ pub fn run(checks: fn() -> (Vec<Finding>, usize)) -> io::Result<()> {
             .update(|t| {
                 t.attention |= fresh;
                 t.problems = problems;
-                t.ignored = ignored;
+                t.ignored = ignored.len();
                 t.checked = Some(SystemTime::now());
                 t.busy = false;
             })

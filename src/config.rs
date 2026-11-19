@@ -88,6 +88,21 @@ pub fn is_ignored(f: &Finding, patterns: &[String]) -> bool {
     patterns.iter().any(|p| hay.contains(p.as_str()))
 }
 
+/// (kept, ignored).
+pub fn split_ignored(findings: Vec<Finding>) -> (Vec<Finding>, Vec<Finding>) {
+    let pats = ignores();
+    findings.into_iter().partition(|f| !is_ignored(f, &pats))
+}
+
+/// Remove every ignore pattern that matches this finding; returns how many.
+pub fn unignore(f: &Finding) -> io::Result<usize> {
+    let mut n = 0;
+    for p in ignores().iter().filter(|p| is_ignored(f, std::slice::from_ref(p))) {
+        n += remove_ignore(p)? as usize;
+    }
+    Ok(n)
+}
+
 /// Drop ignored findings; returns how many were dropped.
 pub fn apply_ignores(findings: &mut Vec<Finding>) -> usize {
     let pats = ignores();
@@ -126,6 +141,7 @@ mod tests {
         assert!(is_ignored(&f, &["casper-md5check".into()]));
         assert!(is_ignored(&f, &["failed-unit".into()]));
         assert!(!is_ignored(&f, &["battery".into()]));
+        assert!(is_ignored(&f, std::slice::from_ref(&"casper".to_string())));
     }
 
     #[test]

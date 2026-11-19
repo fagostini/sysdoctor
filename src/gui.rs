@@ -8,12 +8,12 @@ use vte4::prelude::*;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-type Checks = fn() -> (Vec<Finding>, usize);
+type Checks = fn() -> (Vec<Finding>, Vec<Finding>);
 type Cleanups = fn() -> Vec<Finding>;
 
 pub const APP_ID: &str = "io.github.sysdoctor";
 
-const CSS: &str = ".crit { color: #e01b24; } .warn { color: #e5a50a; } .ok { color: #2ec27e; } .title { font-weight: bold; } .cmd { font-family: monospace; background: alpha(currentColor, 0.08); border: 1px solid alpha(currentColor, 0.15); border-radius: 6px; padding: 6px 8px; } .caption { font-size: smaller; font-weight: bold; opacity: 0.7; }";
+const CSS: &str = ".crit { color: #e01b24; } .warn { color: #e5a50a; } .ok { color: #2ec27e; } .title { font-weight: bold; } .cmd { font-family: monospace; background: alpha(currentColor, 0.08); border: 1px solid alpha(currentColor, 0.15); border-radius: 6px; padding: 6px 8px; } .ignored { opacity: 0.6; } .caption { font-size: smaller; font-weight: bold; opacity: 0.7; }";
 
 #[derive(Clone)]
 struct Ui {
@@ -182,7 +182,8 @@ impl Ui {
     }
 
     /// One finding as a framed card. `pick`: cleanup checkbox in place of the severity icon.
-    fn card(&self, f: &Finding, pick: Option<&gtk::CheckButton>) -> gtk::Frame {
+    /// `ignored`: dimmed, with "Stop ignoring" instead of Run/Ignore.
+    fn card(&self, f: &Finding, pick: Option<&gtk::CheckButton>, ignored: bool) -> gtk::Frame {
         let body = vbox(6, 10);
         let top = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         match pick {
@@ -202,10 +203,20 @@ impl Ui {
             top.append(&size);
         }
         let title = label(&f.title);
+        title.set_selectable(false); // selectable text grabs focus on reload and shows up all-selected
         title.set_hexpand(true);
         title.add_css_class("title");
         top.append(&title);
-        if pick.is_none() {
+        if ignored {
+            let b = gtk::Button::with_label("Stop ignoring");
+            b.set_valign(gtk::Align::Center);
+            let (ui, f) = (self.clone(), f.clone());
+            b.connect_clicked(move |_| match config::unignore(&f) {
+                Ok(_) => ui.reload(),
+                Err(e) => ui.status.set_text(&format!("unignore failed: {e}")),
+            });
+            top.append(&b);
+        } else if pick.is_none() {
             if f.fix.is_some() {
                 let b = gtk::Button::with_label("Run…");
                 b.add_css_class("suggested-action");
@@ -259,11 +270,15 @@ impl Ui {
             body.append(&cap);
             body.append(&l);
         }
-        gtk::Frame::builder().child(&body).build()
+        let frame = gtk::Frame::builder().child(&body).build();
+        if ignored {
+            frame.add_css_class("ignored");
+        }
+        frame
     }
 
     /// Returns the number of problems shown.
-    fn render_health(&self, mut f: Vec<Finding>, ignored: usize) -> usize {
+    fn render_health(&self, mut f: Vec<Finding>, ignored: Vec<Finding>) -> usize {
         clear(&self.health);
         f.sort_by_key(|f| std::cmp::Reverse(f.severity));
         let (problems, ok): (Vec<_>, Vec<_>) = f.into_iter().partition(|f| f.severity != Severity::Ok);
@@ -275,7 +290,7 @@ impl Ui {
             self.health.append(&l);
         }
         for p in &problems {
-            self.health.append(&self.card(p, None));
+            self.health.append(&self.card(p, None, false));
         }
         let passing = vbox(2, 6);
         for o in &ok {
@@ -283,10 +298,13 @@ impl Ui {
         }
         let title = format!("Passing checks ({})", ok.len());
         self.health.append(&gtk::Expander::builder().label(title).child(&passing).margin_top(8).build());
-        if ignored > 0 {
-            let l = label(&format!("{ignored} finding(s) ignored. List: sysdoctor ignore"));
-            l.add_css_class("dim-label");
-            self.health.append(&l);
+        if !ignored.is_empty() {
+            let list = vbox(8, 6);
+            for i in &ignored {
+                list.append(&self.card(i, None, true));
+            }
+            let title = format!("Ignored ({})", ignored.len());
+            self.health.append(&gtk::Expander::builder().label(title).child(&list).expanded(true).build());
         }
         problems.len()
     }
@@ -306,7 +324,7 @@ impl Ui {
         for f in items {
             // regenerable (Ok) pre-ticked; "review" (Warn) items are opt-in
             let c = gtk::CheckButton::builder().active(f.severity == Severity::Ok).valign(gtk::Align::Center).build();
-            self.clean.append(&self.card(&f, Some(&c)));
+            self.clean.append(&self.card(&f, Some(&c), false));
             picks.push((c, f));
         }
         let ui = self.clone();
