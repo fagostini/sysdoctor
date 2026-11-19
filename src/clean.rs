@@ -296,7 +296,8 @@ fn containers(_: &Path) -> Vec<Finding> {
             let s = run(bin, &["system", "df", "--format", "{{.Type}}\t{{.Reclaimable}}"])?;
             // Reclaimable looks like "1.2GB (30%)"
             let b: u64 = s.lines().filter_map(|l| parse_size(l.split('\t').nth(1)?.split_whitespace().next()?)).sum();
-            let mut f = Finding::new(bin, Severity::Ok, format!("{label} unused images/containers/cache")).cmd(format!("{bin} system prune"));
+            // --all: every unused image, not just dangling ones; matches the Reclaimable figure above
+            let mut f = Finding::new(bin, Severity::Ok, format!("{label} unused images/containers/cache")).cmd(format!("{bin} system prune --all"));
             f.bytes = Some(b);
             (b > 0).then_some(f)
         })
