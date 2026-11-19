@@ -61,6 +61,9 @@ pub fn run_any(cmd: &str, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// "0.1.1 (50bd183)": crate version plus the git commit it was built from (see build.rs).
+pub const VERSION: &str = env!("SYSDOCTOR_VERSION");
+
 /// Our binary's path. After a rebuild or upgrade replaces the file, Linux reports
 /// "<path> (deleted)": relaunch whatever now sits at <path>.
 pub fn exe() -> std::io::Result<PathBuf> {

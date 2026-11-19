@@ -219,6 +219,7 @@ impl ksni::Tray for SysTray {
         if !status.is_empty() {
             m.push(item(status, false, |_| {}));
         }
+        m.push(item(format!("sysdoctor {}", crate::finding::VERSION), false, |_| {}));
         m.push(item("Quit", true, |_| std::process::exit(0)));
         m
     }

@@ -118,6 +118,13 @@ fn build(app: &gtk::Application, checks: Checks, cleanups: Cleanups) {
     let (health, clean) = (page("health", "Health", &gtk::Box::new(gtk::Orientation::Vertical, 0)), page("clean", "Cleanup", &clean_bar));
     let status = gtk::Label::builder().xalign(0.0).margin_start(14).margin_end(14).margin_top(6).margin_bottom(6).build();
     status.add_css_class("dim-label");
+    status.set_hexpand(true);
+    let version = gtk::Label::builder().label(format!("sysdoctor {}", crate::finding::VERSION)).margin_end(14).build();
+    version.add_css_class("dim-label");
+    version.set_selectable(true);
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    footer.append(&status);
+    footer.append(&version);
     let term = vte4::Terminal::builder().vexpand(true).scrollback_lines(5000).build();
     term.set_size_request(-1, 160);
     let term_pane = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -138,7 +145,7 @@ fn build(app: &gtk::Application, checks: Checks, cleanups: Cleanups) {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.append(&paned);
     root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    root.append(&status);
+    root.append(&footer);
     window.set_child(Some(&root));
 
     let ui = Ui { window, health, clean, clean_bar, status, spinner, refresh, report: Rc::default(), term, term_pane, running: Rc::default(), picked: Rc::default(), checks, cleanups };

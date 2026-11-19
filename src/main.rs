@@ -19,7 +19,7 @@ use std::process::{Command, ExitCode};
 
 /// System health check and cleanup advisor.
 #[derive(Parser)]
-#[command(version)]
+#[command(version = finding::VERSION)]
 struct Cli {
     /// Machine-readable output (check, clean, startup)
     #[arg(long, global = true)]
