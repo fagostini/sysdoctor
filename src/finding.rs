@@ -10,14 +10,14 @@ pub enum Severity {
     Crit,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "lowercase", tag = "kind", content = "value")]
 pub enum Fix {
     Command(String),
     Trash(Vec<PathBuf>),
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Clone)]
 pub struct Finding {
     pub id: &'static str,
     pub severity: Severity,
@@ -59,6 +59,13 @@ pub fn run(cmd: &str, args: &[&str]) -> Option<String> {
 pub fn run_any(cmd: &str, args: &[&str]) -> Option<String> {
     let out = Command::new(cmd).args(args).output().ok()?;
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Our binary's path. After a rebuild or upgrade replaces the file, Linux reports
+/// "<path> (deleted)": relaunch whatever now sits at <path>.
+pub fn exe() -> std::io::Result<PathBuf> {
+    let p = std::env::current_exe()?;
+    Ok(p.to_str().and_then(|s| s.strip_suffix(" (deleted)")).map(PathBuf::from).unwrap_or(p))
 }
 
 /// XDG base dir: $var if set and absolute, else $HOME/fallback.

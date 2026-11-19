@@ -52,7 +52,7 @@ fn notify(new: &[&Finding]) {
     let (urgency, title, body) = summary(new);
     // Waiting for a button click must outlive this process: the timer's oneshot cgroup is killed
     // when `watch` exits, so the waiter runs in its own transient user unit.
-    let launched = std::env::current_exe().is_ok_and(|exe| {
+    let launched = crate::finding::exe().is_ok_and(|exe| {
         Command::new("systemd-run")
             .args(["--user", "--collect", "--quiet"])
             .arg(exe)
@@ -85,9 +85,15 @@ fn open_report() {
 
 /// Run `sysdoctor <args>` in a new terminal window, which waits for Enter before closing.
 pub fn open_in_terminal(args: &str) {
-    let Ok(exe) = std::env::current_exe() else { return };
+    let Ok(exe) = crate::finding::exe() else { return };
+    run_in_terminal(&format!("\"{}\" {args}", exe.display()));
+}
+
+/// Run a shell command in a new terminal window, which waits for Enter before closing.
+pub fn run_in_terminal(script: &str) {
     // One string after -e: understood by terminator, gnome-terminal and xterm alike.
-    let cmd = format!("sh -c '\"{}\" {args}; printf \"\\nPress Enter to close\"; read _'", exe.display());
+    let script = script.replace('\'', "'\\''");
+    let cmd = format!("sh -c '{script}; printf \"\\nPress Enter to close\"; read _'");
     // ponytail: Debian/Ubuntu/Mint alternatives link; add a config knob if other distros need it.
     // wait: when called from the notification's transient unit, exiting early would kill the terminal
     let _ = Command::new("x-terminal-emulator").args(["-e", &cmd]).status();
@@ -119,7 +125,7 @@ pub fn watch(findings: &[Finding]) -> io::Result<()> {
 }
 
 pub fn install() -> io::Result<()> {
-    let exe = std::env::current_exe()?;
+    let exe = crate::finding::exe()?;
     if exe.components().any(|c| c.as_os_str() == "target") {
         eprintln!("warning: {} is a build artifact; run `cargo install --path .` and install from there", exe.display());
     }

@@ -2,6 +2,8 @@ mod check;
 mod clean;
 mod config;
 mod finding;
+#[cfg(feature = "gui")]
+mod gui;
 mod health;
 mod report;
 mod security;
@@ -78,6 +80,8 @@ enum Cmd {
         #[arg(long)]
         install: bool,
     },
+    /// Window with the full report, fix buttons and cleanup (needs the `gui` build feature)
+    Gui,
     /// Print shell completions
     Completions { shell: clap_complete::Shell },
     /// Print the man page (roff)
@@ -181,6 +185,19 @@ fn checks() -> (Vec<Finding>, usize) {
     (f, n)
 }
 
+/// Cleanup findings minus ignored ones, biggest first.
+fn cleanups() -> Vec<Finding> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return vec![] };
+    // scanners are I/O bound and independent: run them concurrently
+    let mut f: Vec<Finding> = std::thread::scope(|sc| {
+        let hs: Vec<_> = clean::SCANNERS.iter().map(|s| sc.spawn(|| s(&home))).collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+    });
+    config::apply_ignores(&mut f);
+    f.sort_by_key(|f| std::cmp::Reverse(f.bytes.unwrap_or(0)));
+    f
+}
+
 fn fail(what: &str, e: impl std::fmt::Display) -> ExitCode {
     eprintln!("{what}: {e}");
     ExitCode::from(2)
@@ -210,13 +227,7 @@ fn main() -> ExitCode {
             ExitCode::from(f.iter().map(|f| f.severity).max().unwrap_or(Severity::Ok) as u8)
         }
         Cmd::Clean { apply } => {
-            // scanners are I/O bound and independent: run them concurrently
-            let mut f: Vec<Finding> = std::thread::scope(|sc| {
-                let hs: Vec<_> = clean::SCANNERS.iter().map(|s| sc.spawn(|| s(&home))).collect();
-                hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
-            });
-            config::apply_ignores(&mut f);
-            f.sort_by_key(|f| std::cmp::Reverse(f.bytes.unwrap_or(0)));
+            let f = cleanups();
             output(&f, cli.json);
             if !cli.json {
                 println!("\nreclaimable: {}", human(f.iter().filter_map(|f| f.bytes).sum()));
@@ -285,6 +296,10 @@ fn main() -> ExitCode {
             print!("{}", toml::to_string(config::get()).unwrap_or_default());
             ExitCode::SUCCESS
         }
+        #[cfg(feature = "gui")]
+        Cmd::Gui => ExitCode::from(gui::run(checks, cleanups) as u8),
+        #[cfg(not(feature = "gui"))]
+        Cmd::Gui => fail("gui", "built without the `gui` feature; reinstall with `cargo install --path . --features gui`"),
         Cmd::Tray { install } => {
             let r = if install { tray::install() } else { tray::run(checks) };
             r.map_or_else(|e| fail("tray", e), |_| ExitCode::SUCCESS)

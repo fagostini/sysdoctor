@@ -37,6 +37,13 @@ sysdoctor collects them into one report in plain English. Every problem comes wi
 cargo install --path .
 ```
 
+With the report window (`sysdoctor gui`), which needs GTK 4 and VTE headers to build:
+
+```sh
+sudo apt install libgtk-4-dev libvte-2.91-gtk4-dev
+cargo install --path . --features gui
+```
+
 **As a .deb** (Debian, Ubuntu, Mint), which also installs the man page and shell completions:
 
 ```sh
@@ -59,6 +66,7 @@ sysdoctor completions zsh > ~/.zfunc/_sysdoctor     # or bash, fish, elvish, pow
 |---|---|
 | `check` | Health report. `--fix` offers to run fixes, `--bar` prints status bar JSON |
 | `clean` | Lists reclaimable space. `--apply` trashes regenerable files and offers cleanup commands |
+| `gui` | Window with the full report: Fix and Ignore buttons per problem, tick-and-clean cleanup list, Check again, copy report. Fix commands run in a terminal so `sudo` can prompt. Needs `--features gui` |
 | `tray` | Status icon in the panel. `--install` starts it at every login |
 | `watch` | For timers: notifies on new problems, records daily snapshots. `--install`, `--snooze H` |
 | `growth` | What grew on disk over the last N days |
@@ -129,7 +137,7 @@ Shows each problem's fix command and asks before running it. Commands run in you
 
 ### `sysdoctor tray [--install]`
 
-A coloured dot in the panel tray: **green** all OK, **yellow** warnings, **red** critical, grey while the first check runs. Hovering lists the problems. Left click opens the full report in a terminal. The menu has:
+A heart with a pulse line in the panel tray: **green** all OK, **yellow** warnings, **red** critical, grey while the first check runs. A badge shows the number of problems (+ for 10 or more). The menu can switch to a monochrome heart and to a plain red dot instead of the number; the choice is saved in `~/.local/state/sysdoctor/tray-style`. When a check finds a new problem the heart pulses until you click it or use the menu. Hovering lists the problems. Left click opens the full report in a terminal. The menu has:
 
 - the current problems (click to open the report)
 - **Open full report**, **Fix problems…** (`check --fix`), **Clean up (preview)**
