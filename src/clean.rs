@@ -13,6 +13,21 @@ pub const SCANNERS: &[fn(&Path) -> Vec<Finding>] =
 const MIN: u64 = 50 << 20; // ignore anything smaller than 50M
 
 
+/// Permanent removal, for the GUI's "delete permanently" tick. Stops at the first failure.
+/// remove_dir_all doesn't follow symlinks: a path swapped for a link since the scan loses only the link.
+#[cfg(any(feature = "gui", test))]
+pub fn delete_all(paths: &[PathBuf]) -> Result<(), String> {
+    for p in paths {
+        let r = match fs::symlink_metadata(p) {
+            Ok(m) if m.is_dir() => fs::remove_dir_all(p),
+            Ok(_) => fs::remove_file(p),
+            Err(e) => Err(e),
+        };
+        r.map_err(|e| format!("{}: {e}", crate::finding::printable(&p.to_string_lossy())))?;
+    }
+    Ok(())
+}
+
 /// Real disk usage: st_blocks (handles sparse), hardlinks once, no symlink follow, no mount crossing.
 pub fn du(root: &Path) -> u64 {
     du_newest(root).0
@@ -390,6 +405,21 @@ fn flatpak(_: &Path) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_all_keeps_symlink_targets() {
+        let d = tempfile::tempdir().unwrap();
+        let (dir, outside, swapped) = (d.path().join("target"), d.path().join("keep"), d.path().join("swapped"));
+        fs::create_dir_all(dir.join("debug")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("f"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("debug/link")).unwrap(); // link inside the tree
+        std::os::unix::fs::symlink(&outside, &swapped).unwrap(); // the path itself is now a link
+        delete_all(&[dir.clone(), swapped.clone()]).unwrap();
+        assert!(!dir.exists() && fs::symlink_metadata(&swapped).is_err());
+        assert!(outside.join("f").exists(), "followed a symlink");
+        assert!(delete_all(&[dir]).is_err()); // already gone: reported, not silent
+    }
 
     /// A hostile repo (as from an extracted tarball) must not get to run its commands.
     #[test]
