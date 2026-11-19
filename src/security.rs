@@ -34,7 +34,7 @@ pub fn updates() -> Vec<Finding> {
 }
 
 /// Version-aware ordering for kernel strings like "6.8.0-149-generic".
-pub fn vercmp(a: &str, b: &str) -> Ordering {
+fn vercmp(a: &str, b: &str) -> Ordering {
     fn parts(s: &str) -> Vec<u64> {
         s.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect()
     }
@@ -119,7 +119,7 @@ const TOKENS: &[(&str, usize, &str)] = &[
 ];
 
 /// First secret-looking token in a line, by label. Never returns the secret itself.
-pub fn find_secret(line: &str) -> Option<&'static str> {
+fn find_secret(line: &str) -> Option<&'static str> {
     if line.contains("PRIVATE KEY-----") {
         return Some("private key");
     }
@@ -178,7 +178,7 @@ fn expiry(what: String, at: u64) -> Option<Finding> {
 }
 
 /// (description, expiry epoch) for own GPG keys from `gpg --list-secret-keys --with-colons`.
-pub fn gpg_expiries(colons: &str) -> Vec<(String, u64)> {
+fn gpg_expiries(colons: &str) -> Vec<(String, u64)> {
     let mut out = vec![];
     let mut uid = String::new();
     let mut pending: Vec<(String, u64)> = vec![];

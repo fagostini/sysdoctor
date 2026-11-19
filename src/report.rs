@@ -33,7 +33,7 @@ fn gpus() -> Vec<String> {
 }
 
 /// Replace identifying strings: home path, user name, host name, IPv4 and MAC addresses.
-pub fn scrub(text: &str, home: &str, user: &str, host: &str) -> String {
+fn scrub(text: &str, home: &str, user: &str, host: &str) -> String {
     let mut s = text.to_string();
     // longest first, so a host name containing the user name is replaced whole
     let mut names = [(home, "~"), (user, "<user>"), (host, "<host>")];

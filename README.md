@@ -23,6 +23,34 @@ It answers two everyday questions:
 
 It can also watch in the background and notify you only when something *new* goes wrong, show what has been growing on disk, track battery and disk wear over time, explain what slows your startup, and produce a privacy-scrubbed summary to paste into a forum when asking for help.
 
+## Features
+
+- **Health check:** about 20 checks covering disks, SMART, failed services, updates, pending reboot, memory, firewall, SSH, file permissions, leaked tokens in shell history, expiring keys and certificates, backups, battery, CPU throttling, firmware, system log errors and clock sync. Each problem says what is wrong and how to fix it.
+- **Cleanup advisor:** finds reclaimable space (stale build output, package and developer caches, AI models, old kernels, journal, containers, conda, snap, flatpak) and sizes it before you decide anything.
+- **Report window** (`sysdoctor gui`): the full report with a Run button per problem, a tick list for cleanup with a live total of what you selected, ignored issues kept visible with **Stop ignoring**, and an embedded terminal that shows commands running.
+- **Tray icon:** a heart that turns yellow or red, counts problems, and pulses when something new appears.
+- **Background watch:** an hourly timer that notifies you only about *new* problems, with snooze.
+- **History:** what grew on disk, battery and disk wear over time, and what slows boot, login and your shell.
+- **Forum-ready report:** a Markdown summary with your user name, hostname, home path and addresses scrubbed out.
+- **Fits in:** status bar JSON (Waybar and others), `--json` output, exit codes for scripts, your own check plugins, an ignore list and a config file.
+- **Most distros:** apt, dnf, pacman and zypper are detected automatically.
+
+### You stay in control
+
+- **Nothing changes unless you ask.** Checking, listing, the tray icon and the background watch only *read*. Something on your system changes only when you press **Run** or **Clean selected** in the window, run `check --fix` or `clean --apply`, or press a notification's **Snooze** button. **Ignore** and **Stop ignoring** only edit sysdoctor's own ignore list.
+- **Every system change is confirmed.** The window shows a dialog listing each command and each folder before anything happens. On the command line you answer `y` for each command separately.
+- **You see the exact commands.** Every problem and cleanup item shows its fix in full: the command under **Runs**, or the folders under **Moves to trash**. When it runs, each command is printed in the terminal before it starts, and the sequence stops at the first failure.
+- **Root only through `sudo`.** Commands that need root say so (`sudo …`) and go through your system's normal password prompt. sysdoctor never stores a password, is never setuid, and runs no root process of its own.
+- **Careful with deletion.** Folders sysdoctor removes itself go to the trash, so you can restore them. Cleanup *commands* (emptying the trash, `apt clean`, `docker system prune`, journal vacuum, removing old kernels) delete for good, which is why they are spelled out and confirmed first. Only regenerable items are pre-selected; anything that needs a judgement call starts unticked. Projects used in the last 30 days (configurable), projects with uncommitted git changes, the running kernel and the two newest kernels are never offered.
+- **Background parts are opt-in.** The timer and the tray icon exist only after you run `watch --install` or `tray --install`, and both can be removed.
+
+### Your data stays yours
+
+- **No network.** No telemetry, no uploads, no update checks. Pending updates are counted from your package manager's local cache. The only connection it may make is to *your own* backup repository (Kopia, restic or borg, if you set one up), to read the date of the last snapshot. That is read-only and times out after 30–60 seconds.
+- **Nothing leaves the machine on its own.** Notifications are local desktop notifications. The forum report is only printed or copied to your clipboard when you ask, and identifying details are scrubbed first.
+- **Secrets are never shown.** The shell-history scan reports the file and line number of a token, never the token itself.
+- **Local, plain-text state.** What it remembers (problems seen last time, daily folder sizes in your home, battery and disk wear) lives in `~/.local/state/sysdoctor/`, and your settings in `~/.config/sysdoctor/`. Delete them whenever you like.
+
 ## Why
 
 Linux has the raw information spread over many tools: `systemctl --failed`, `smartctl`, `journalctl`, `apt`, `timedatectl`, `df`, `du`, `docker system df`, `snap list --all`, and so on. Each speaks its own format and none of them tells you what to do next.
@@ -52,7 +80,9 @@ cargo install cargo-deb
 sudo apt install ./target/debian/sysdoctor_*.deb
 ```
 
-Optional tools used when present: `smartmontools` (disk health and wear), `libnotify-bin` (desktop notifications), `docker`, `snap`, `flatpak`, `gio`, `gpg`, `openssl`, `kopia`.
+On Fedora use `sudo dnf install 'pkgconfig(gtk4)' 'pkgconfig(vte-2.91-gtk4)'`, on openSUSE the same with `sudo zypper install`, and on Arch `sudo pacman -S gtk4 vte4`.
+
+Optional tools used when present: `smartmontools` (disk health and wear), `libnotify-bin` (desktop notifications), `gio`, `gpg`, `openssl`; `docker`, `podman`, `snap`, `flatpak`, `conda` for cleanup; `kopia`, `restic`, `borg`/`borgmatic`, `snapper` for the backup check.
 
 **Shell completions** for a source install:
 
@@ -66,7 +96,7 @@ sysdoctor completions zsh > ~/.zfunc/_sysdoctor     # or bash, fish, elvish, pow
 |---|---|
 | `check` | Health report. `--fix` offers to run fixes, `--bar` prints status bar JSON |
 | `clean` | Lists reclaimable space. `--apply` trashes regenerable files and offers cleanup commands |
-| `gui` | Window with the full report: Fix and Ignore buttons per problem, tick-and-clean cleanup list, Check again, copy report. Fix commands run in a terminal so `sudo` can prompt. Needs `--features gui` |
+| `gui` | Report window: Run and Ignore per problem, tick-and-clean cleanup list, embedded terminal. Needs `--features gui` |
 | `tray` | Status icon in the panel. `--install` starts it at every login |
 | `watch` | For timers: notifies on new problems, records daily snapshots. `--install`, `--snooze H` |
 | `growth` | What grew on disk over the last N days |
@@ -135,13 +165,26 @@ Shows each problem's fix command and asks before running it. Commands run in you
 
 **Polybar, i3blocks and others** that take plain text: `sysdoctor check --bar | jq -r .text`. **GNOME**: use the Executor or Argos extension.
 
+### `sysdoctor gui`
+
+The whole report in one window (build with `--features gui`):
+
+- **Health** tab: one card per problem with its fix command, a **Run…** button and an **Ignore** button. Passing checks are folded away. Ignored problems stay listed, dimmed, with **Stop ignoring**.
+- **Cleanup** tab: every reclaimable item with its size and exact command or folders. Regenerable items start ticked, items that need a decision start unticked. The header shows *Selected: X of Y reclaimable* as you tick.
+- **Run** and **Clean selected** first show a confirmation dialog listing everything that will happen. Folders go to the trash. Commands run in a terminal panel at the bottom of the window, where `sudo` can ask for your password, then the report refreshes.
+- **Check again** re-runs everything. **Copy** puts the scrubbed `report` on the clipboard.
+
+Only one window opens: launching it again brings the existing one to the front.
+
 ### `sysdoctor tray [--install]`
 
-A heart with a pulse line in the panel tray: **green** all OK, **yellow** warnings, **red** critical, grey while the first check runs. A badge shows the number of problems (+ for 10 or more). The menu can switch to a monochrome heart and to a plain red dot instead of the number; the choice is saved in `~/.local/state/sysdoctor/tray-style`. When a check finds a new problem the heart pulses until you click it or use the menu. Hovering lists the problems. Left click opens the full report in a terminal. The menu has:
+A heart with a pulse line in the panel tray: **green** all OK, **yellow** warnings, **red** critical, grey while the first check runs. A badge shows the number of problems (+ for 10 or more). The menu can switch to a monochrome heart and to a plain red dot instead of the number; the choice is saved in `~/.local/state/sysdoctor/tray-style`. When a check finds a new problem the heart pulses until you click it or use the menu. Hovering lists the problems. Left click opens the report window (or the report in a terminal, if built without `gui`). The menu has:
 
 - the current problems (click to open the report)
 - **Open full report**, **Fix problems…** (`check --fix`), **Clean up (preview)**
-- **Check now**, **Snooze notifications 24h**, **Quit**
+- **Check now**, **Snooze notifications 24h**, **Monochrome icon**, **Red dot instead of count**, **Quit**
+
+Ignored problems are not counted.
 
 It re-runs the checks every 15 minutes. Only one instance runs at a time.
 
@@ -246,7 +289,9 @@ sysdoctor ignore                     # list
 sysdoctor ignore --remove casper-md5check
 ```
 
-The list lives in `~/.config/sysdoctor/ignore`, one pattern per line. Ignored findings disappear from `check`, `watch`, `--bar` and `report`, and `check` shows how many were hidden.
+The list lives in `~/.config/sysdoctor/ignore`, one pattern per line. Ignored findings disappear from `check`, `watch`, `--bar`, `report` and the tray count, and `check` shows how many were hidden. The window keeps them visible in an **Ignored** section with a **Stop ignoring** button, which removes every pattern that matches.
+
+The window's **Ignore** button adds the finding's id, so it mutes that whole kind of finding (for example all failed units). Use `sysdoctor ignore` with part of the title to be more specific.
 
 ### `--json`
 
@@ -312,14 +357,12 @@ chmod 755 ~/.config/sysdoctor/checks.d/restic
 
 Plugins are stopped after 10 seconds. Files writable by group or others are ignored, so nobody else can slip code into your checks.
 
-## Safety
+## Safety details
 
-- **Read-only by default.** Only `clean --apply` and `check --fix` change anything, and both ask first.
-- **Deletes go to the trash.** `clean --apply` only trashes regenerable files (build output, package caches), after showing the list. You can restore them.
-- **Commands are confirmed one at a time.** Anything needing root or affecting shared state (journal, kernels, docker) is shown in full and only runs if you answer `y`.
-- **Skips active work.** Projects touched recently or with uncommitted git changes are left alone. The two newest kernels are always kept.
-- **No surprises from the disk scan.** Size measurement does not follow symlinks, does not cross into other filesystems, and counts hardlinked files once.
-- **Secrets stay secret.** Token findings show file and line numbers only. `report` scrubs identifying details.
+- **Disk scan:** size measurement does not follow symlinks, does not cross into other filesystems, and counts hardlinked files once.
+- **Plugins:** only executables in `~/.config/sysdoctor/checks.d/` that are not writable by group or others are run, and each is stopped after 10 seconds.
+- **`clean --apply`** shows every folder it will trash and asks once, then offers each command separately.
+- **`check --fix`** only works in an interactive terminal, so it can never run unattended.
 
 ## Strategy and design
 
@@ -344,6 +387,7 @@ Plugins are stopped after 10 seconds. Files writable by group or others are igno
 | `trends.jsonl` | One health sample (battery, disk wear) per line, appended daily |
 | `snooze-until` | Unix time when a snooze ends |
 | `tray.lock` | Keeps a second tray icon from starting |
+| `tray-style` | Tray icon options (monochrome, red dot) |
 
 Delete them at any time to reset.
 
@@ -359,7 +403,9 @@ Delete them at any time to reset.
 | `src/clean.rs` | Cleanup scanners and the disk-usage walker |
 | `src/watch.rs` | Notifications, snooze, timer install, growth and trends |
 | `src/report.rs` | `report` and `startup` |
+| `src/pkg.rs` | Package manager detection: updates, reboot, package cache, install hints |
 | `src/tray.rs` | The tray icon |
+| `src/gui.rs` | The report window (feature `gui`) |
 | `src/main.rs` | Command line and output |
 
 Adding a check means writing one `fn() -> Vec<Finding>` and listing it in `CHECKS` in `src/check.rs`. Adding a cleanup category works the same way with `SCANNERS` in `src/clean.rs`.
@@ -376,8 +422,9 @@ Adding a check means writing one `fn() -> Vec<Finding>` and listing it in `CHECK
 ## Development
 
 ```sh
-cargo test       # unit tests
-cargo clippy     # lints
+cargo test                       # unit tests
+cargo clippy --all-targets       # lints (add --features gui for the window)
 cargo run -- check
+cargo run --features gui -- gui
 ./scripts/deb.sh # build the .deb
 ```

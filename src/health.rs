@@ -164,7 +164,7 @@ fn snapper() -> Vec<(&'static str, Option<u64>, String)> {
 }
 
 /// Newest /var/log/timeshift/YYYY-MM-DD_HH-MM-SS_backup.log, as a timestamp.
-pub fn timeshift_last_log() -> Option<u64> {
+fn timeshift_last_log() -> Option<u64> {
     let newest = fs::read_dir("/var/log/timeshift")
         .ok()?
         .flatten()
@@ -201,7 +201,7 @@ pub fn backup() -> Vec<Finding> {
 // ---- journal digest ----
 
 /// Collapse variable parts so repeats of the same error group together.
-pub fn normalize(msg: &str) -> String {
+fn normalize(msg: &str) -> String {
     msg.split_whitespace()
         .map(|t| if t.chars().any(|c| c.is_ascii_digit()) { "#" } else { t })
         .collect::<Vec<_>>()
@@ -270,7 +270,7 @@ pub fn throttling() -> Vec<Finding> {
 }
 
 /// (some avg300, full avg300) from a /proc/pressure/memory text.
-pub fn psi(text: &str) -> Option<(f64, f64)> {
+fn psi(text: &str) -> Option<(f64, f64)> {
     let get = |kind: &str| -> Option<f64> {
         let line = text.lines().find(|l| l.starts_with(kind))?;
         line.split_whitespace().find_map(|t| t.strip_prefix("avg300="))?.parse().ok()

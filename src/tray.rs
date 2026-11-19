@@ -51,7 +51,7 @@ fn seg_dist((px, py): (f32, f32), (ax, ay): (f32, f32), (bx, by): (f32, f32)) ->
 }
 
 #[derive(Clone, Copy)]
-pub enum Badge {
+enum Badge {
     None,
     Count(usize),
     Dot,
@@ -86,7 +86,7 @@ fn shade(x: f32, y: f32, rgb: [u8; 3], mono: bool, badge: Badge) -> Option<[u8; 
 }
 
 /// `size`x`size` ARGB32 (network byte order), 4x4 supersampled for smooth edges.
-pub fn heart(size: i32, rgb: [u8; 3], mono: bool, badge: Badge) -> ksni::Icon {
+fn heart(size: i32, rgb: [u8; 3], mono: bool, badge: Badge) -> ksni::Icon {
     const SS: i32 = 4;
     let k = 32.0 / (size * SS) as f32;
     let mut data = Vec::with_capacity((size * size * 4) as usize);

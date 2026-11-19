@@ -90,7 +90,7 @@ pub fn open_in_terminal(args: &str) {
 }
 
 /// Run a shell command in a new terminal window, which waits for Enter before closing.
-pub fn run_in_terminal(script: &str) {
+fn run_in_terminal(script: &str) {
     // One string after -e: understood by terminator, gnome-terminal and xterm alike.
     let script = script.replace('\'', "'\\''");
     let cmd = format!("sh -c '{script}; printf \"\\nPress Enter to close\"; read _'");
@@ -187,7 +187,7 @@ pub fn record_metrics() -> io::Result<()> {
 }
 
 /// Per metric: (first value, first ts, last value, last ts).
-pub fn trend_table(samples: &[Metrics]) -> BTreeMap<String, (f64, u64, f64, u64)> {
+fn trend_table(samples: &[Metrics]) -> BTreeMap<String, (f64, u64, f64, u64)> {
     let mut t: BTreeMap<String, (f64, u64, f64, u64)> = BTreeMap::new();
     for s in samples {
         for (k, v) in &s.values {
@@ -269,7 +269,7 @@ pub fn snapshot(home: &Path) -> io::Result<Vec<Snap>> {
 }
 
 /// Size change per key, biggest growth first. Keys missing on one side count as 0.
-pub fn deltas(old: &BTreeMap<String, u64>, new: &BTreeMap<String, u64>) -> Vec<(String, i64)> {
+fn deltas(old: &BTreeMap<String, u64>, new: &BTreeMap<String, u64>) -> Vec<(String, i64)> {
     let keys: HashSet<&String> = old.keys().chain(new.keys()).collect();
     let mut v: Vec<(String, i64)> = keys
         .into_iter()

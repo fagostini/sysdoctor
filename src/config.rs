@@ -83,7 +83,7 @@ pub fn ignores() -> Vec<String> {
         .collect()
 }
 
-pub fn is_ignored(f: &Finding, patterns: &[String]) -> bool {
+fn is_ignored(f: &Finding, patterns: &[String]) -> bool {
     let hay = format!("{} {}", f.id, f.title).to_lowercase();
     patterns.iter().any(|p| hay.contains(p.as_str()))
 }
@@ -95,6 +95,7 @@ pub fn split_ignored(findings: Vec<Finding>) -> (Vec<Finding>, Vec<Finding>) {
 }
 
 /// Remove every ignore pattern that matches this finding; returns how many.
+#[cfg(feature = "gui")]
 pub fn unignore(f: &Finding) -> io::Result<usize> {
     let mut n = 0;
     for p in ignores().iter().filter(|p| is_ignored(f, std::slice::from_ref(p))) {

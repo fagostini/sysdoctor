@@ -19,7 +19,7 @@ pub fn du(root: &Path) -> u64 {
 }
 
 /// (disk usage, newest mtime in Unix seconds) of a tree.
-pub fn du_newest(root: &Path) -> (u64, i64) {
+fn du_newest(root: &Path) -> (u64, i64) {
     let Ok(meta) = fs::symlink_metadata(root) else { return (0, 0) };
     let dev = meta.dev();
     let mut seen = HashSet::new();
@@ -61,7 +61,7 @@ fn last_touched(project: &Path, artifact: &str) -> Option<SystemTime> {
         .max()
 }
 
-pub fn is_stale(project: &Path, artifact: &str, now: SystemTime) -> bool {
+fn is_stale(project: &Path, artifact: &str, now: SystemTime) -> bool {
     last_touched(project, artifact)
         .is_some_and(|t| now.duration_since(t).unwrap_or_default() > Duration::from_secs(crate::config::get().stale_days * 86400))
 }
@@ -71,7 +71,7 @@ fn git_dirty(dir: &Path) -> bool {
 }
 
 /// Find stale build artifacts under home: (artifact dir, marker file that proves it's a project).
-pub fn find_artifacts(home: &Path, now: SystemTime) -> Vec<(&'static str, PathBuf)> {
+fn find_artifacts(home: &Path, now: SystemTime) -> Vec<(&'static str, PathBuf)> {
     const KINDS: &[(&str, &str)] = &[("target", "Cargo.toml"), ("node_modules", "package.json")];
     let dev = fs::symlink_metadata(home).map(|m| m.dev()).unwrap_or(0);
     let mut out = vec![];
@@ -201,7 +201,7 @@ fn pkg_cache(_: &Path) -> Vec<Finding> {
 }
 
 /// Installed packages built for a kernel version, from `dpkg-query -W -f='${db:Status-Abbrev}${Package}\n'` output.
-pub fn kernel_packages<'a>(dpkg: &'a str, version: &str) -> Vec<&'a str> {
+fn kernel_packages<'a>(dpkg: &'a str, version: &str) -> Vec<&'a str> {
     let base = version.trim_end_matches("-generic").trim_end_matches("-lowlatency");
     dpkg.lines()
         .filter_map(|l| l.strip_prefix("ii "))
@@ -212,7 +212,7 @@ pub fn kernel_packages<'a>(dpkg: &'a str, version: &str) -> Vec<&'a str> {
 
 /// Kernels to remove from a version-sorted list: everything except the newest two and the running one.
 /// Two, so a bad new kernel always leaves a known-good fallback in the boot menu.
-pub fn removable_kernels(sorted: &[String], running: &str) -> Vec<String> {
+fn removable_kernels(sorted: &[String], running: &str) -> Vec<String> {
     let keep_from = sorted.len().saturating_sub(2);
     sorted[..keep_from].iter().filter(|k| *k != running).cloned().collect()
 }
@@ -302,7 +302,7 @@ fn containers(_: &Path) -> Vec<Finding> {
 }
 
 /// Bytes `conda clean --all` would free, from its --dry-run --json output.
-pub fn conda_reclaimable(json: &str) -> u64 {
+fn conda_reclaimable(json: &str) -> u64 {
     let v: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
     ["packages", "tarballs"].iter().filter_map(|k| v[k]["total_size"].as_u64()).sum()
 }

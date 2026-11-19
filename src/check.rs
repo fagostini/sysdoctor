@@ -35,7 +35,7 @@ fn plugins() -> Vec<Finding> {
     files.iter().map(|p| run_plugin(p, Duration::from_secs(10))).collect()
 }
 
-pub fn run_plugin(path: &Path, timeout: Duration) -> Finding {
+fn run_plugin(path: &Path, timeout: Duration) -> Finding {
     let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
     let Ok(mut child) = Command::new(path).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else {
         return Finding::skipped("plugin", format!("{name}: cannot execute"));
@@ -246,7 +246,7 @@ fn firewall() -> Vec<Finding> {
 
 /// Effective global PasswordAuthentication, sshd semantics: first value wins, Include expands
 /// inline, lines after a top-level Match are conditional and ignored. Default yes.
-pub fn sshd_password_auth(path: &Path) -> bool {
+fn sshd_password_auth(path: &Path) -> bool {
     fn walk(path: &Path, depth: u8) -> Option<bool> {
         if depth > 8 {
             return None;
@@ -316,7 +316,7 @@ fn ssh_password() -> Vec<Finding> {
         .cmd("echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/00-nopass.conf && sudo systemctl reload ssh")]
 }
 
-pub fn battery_ratio(full: &str, design: &str) -> Option<f64> {
+fn battery_ratio(full: &str, design: &str) -> Option<f64> {
     let (f, d): (f64, f64) = (full.trim().parse().ok()?, design.trim().parse().ok()?);
     (d > 0.0).then(|| f * 100.0 / d)
 }

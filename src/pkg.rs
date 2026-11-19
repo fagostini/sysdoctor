@@ -35,7 +35,7 @@ pub fn install(pkg: &str) -> String {
 }
 
 /// Lines of `dnf check-update` that name a package ("name.arch  version  repo").
-pub fn count_dnf(list: &str) -> usize {
+fn count_dnf(list: &str) -> usize {
     list.lines()
         .filter(|l| !l.starts_with(char::is_whitespace))
         .filter(|l| {
@@ -46,7 +46,7 @@ pub fn count_dnf(list: &str) -> usize {
 }
 
 /// Rows of a zypper table whose columns include `marker` (e.g. "v" for list-updates, "security" for list-patches).
-pub fn count_zypper(table: &str, marker: &str) -> usize {
+fn count_zypper(table: &str, marker: &str) -> usize {
     table.lines().filter(|l| l.split('|').map(str::trim).any(|c| c == marker)).count()
 }
 
