@@ -66,7 +66,7 @@ enum Cmd {
     Report,
     /// What slows boot, login and new terminals
     Startup,
-    /// Mute findings whose id or title contains PATTERN (no argument: list)
+    /// Mute findings whose id or title contains PATTERN, or exactly id ID with `id:ID` (no argument: list)
     Ignore {
         pattern: Option<String>,
         /// Remove PATTERN from the ignore list instead

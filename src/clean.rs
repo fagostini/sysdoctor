@@ -147,7 +147,7 @@ fn projects(home: &Path) -> Vec<Finding> {
     out
 }
 
-/// Package manager download caches: always regenerable, so --apply may trash them.
+/// Package manager download caches: regenerable (except Maven, see below), so --apply may trash them.
 const PKG_CACHES: &[(&str, &str)] = &[
     (".cache/pip", "pip cache"),
     (".cargo/registry/cache", "cargo crate downloads"),
@@ -170,13 +170,10 @@ fn pkg_caches(home: &Path) -> Vec<Finding> {
         .zip(paths)
         .zip(sizes)
         .filter(|(_, (b, _))| *b >= MIN)
-        .map(|(((rel, label), p), (b, _))| Finding {
-            id: "pkg-cache",
-            severity: Severity::Ok,
-            title: format!("{label} ~/{rel} (regenerable)"),
-            detail: String::new(),
-            bytes: Some(b),
-            fix: Some(Fix::Trash(vec![p])),
+        .map(|(((rel, label), p), (b, _))| {
+            // locally built (`mvn install`) artifacts can't be re-downloaded: review, not pre-ticked
+            let (severity, note) = if *rel == ".m2/repository" { (Severity::Warn, "review: may hold locally built artifacts") } else { (Severity::Ok, "regenerable") };
+            Finding { id: "pkg-cache", severity, title: format!("{label} ~/{rel} ({note})"), detail: String::new(), bytes: Some(b), fix: Some(Fix::Trash(vec![p])) }
         })
         .collect()
 }
@@ -298,7 +295,8 @@ fn user_trash(home: &Path) -> Vec<Finding> {
     if b < 10 << 20 {
         return vec![];
     }
-    let mut f = Finding::new("trash", Severity::Ok, "Trash").cmd("gio trash --empty");
+    // review, never pre-ticked: emptying is permanent, and would also destroy what this cleanup just trashed
+    let mut f = Finding::new("trash", Severity::Warn, "Trash (review: emptying deletes permanently)").cmd("gio trash --empty");
     f.bytes = Some(b);
     vec![f]
 }
@@ -312,7 +310,8 @@ fn containers(_: &Path) -> Vec<Finding> {
             // Reclaimable looks like "1.2GB (30%)"
             let b: u64 = s.lines().filter_map(|l| parse_size(l.split('\t').nth(1)?.split_whitespace().next()?)).sum();
             // --all: every unused image, not just dangling ones; matches the Reclaimable figure above
-            let mut f = Finding::new(bin, Severity::Ok, format!("{label} unused images/containers/cache")).cmd(format!("{bin} system prune --all"));
+            // review: prune also deletes stopped containers, which can hold data
+            let mut f = Finding::new(bin, Severity::Warn, format!("{label} unused images/containers/cache (review: removes stopped containers)")).cmd(format!("{bin} system prune --all"));
             f.bytes = Some(b);
             (b > 0).then_some(f)
         })
