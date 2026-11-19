@@ -281,7 +281,7 @@ Before printing, it replaces your home path with `~`, and your user name, hostna
 
 ### `sysdoctor ignore [PATTERN] [--remove]`
 
-Mutes findings whose id or title contains PATTERN (case-insensitive). Useful for known, harmless problems:
+Mutes findings whose id or title contains PATTERN (case-insensitive), or, written as `id:ID`, findings with exactly that id. Useful for known, harmless problems:
 
 ```sh
 sysdoctor ignore casper-md5check     # leftover from the installer
@@ -291,7 +291,7 @@ sysdoctor ignore --remove casper-md5check
 
 The list lives in `~/.config/sysdoctor/ignore`, one pattern per line. Ignored findings disappear from `check`, `watch`, `--bar`, `report` and the tray count, and `check` shows how many were hidden. The window keeps them visible in an **Ignored** section with a **Stop ignoring** button, which removes every pattern that matches.
 
-The window's **Ignore** button adds the finding's id, so it mutes that whole kind of finding (for example all failed units). Use `sysdoctor ignore` with part of the title to be more specific.
+The window's **Ignore** button adds `id:<the finding's id>`, so it mutes that whole kind of finding (for example all failed units) and nothing else: ignoring `id:ssh` does not hide a private key finding whose title mentions `~/.ssh`. Use `sysdoctor ignore` with part of the title to be more specific.
 
 ### `--json`
 
@@ -413,7 +413,7 @@ Adding a check means writing one `fn() -> Vec<Finding>` and listing it in `CHECK
 ### Known limits
 
 - restic and borg are found through `$RESTIC_REPOSITORY` / `$BORG_REPO` (or a borgmatic config). Local repositories are read without a password; remote ones need the password in the environment, otherwise they show as "not reachable". snapper needs your user in `ALLOW_USERS`.
-- Package checks detect apt, dnf, pacman or zypper. They read cached metadata only (no network, no root), so counts are as fresh as the last refresh. Pending reboot on Fedora needs `dnf needs-restarting` (dnf-utils). The .deb package and `x-terminal-emulator` fallback are Debian-family only.
+- Package checks detect apt, dnf, pacman or zypper. They read cached metadata only (no network, no root), so counts are as fresh as the last refresh. Pending reboot on Fedora needs `dnf needs-restarting` (dnf-plugins-core); without it the reboot check is skipped. On Arch, update counts reflect the last `pacman -Sy`. The .deb package and `x-terminal-emulator` fallback are Debian-family only.
 - The project scan skips folders whose names start with `.`, so a project kept in a hidden folder will not be found.
 - `growth` tracks only the top level of your home folder.
 - Thermal throttling uses a fixed threshold of 100 events since boot, which some laptops exceed under normal load. `ignore throttling` if it's noise for you.

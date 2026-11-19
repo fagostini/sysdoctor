@@ -66,8 +66,9 @@ pub fn updates() -> Option<(usize, Option<usize>, &'static str)> {
             Some((count_dnf(&list), sec, "sudo dnf upgrade"))
         }
         Pm::Pacman => {
-            // checkupdates (pacman-contrib) syncs a private db copy; pacman -Qu only knows the last sync
-            let list = run("checkupdates", &[]).or_else(|| crate::finding::run_any("pacman", &["-Qu"]))?;
+            // local db only, as of the last `pacman -Sy`. Not checkupdates: it syncs from the mirrors (network).
+            // -Qu exits 1 when nothing is upgradable, so read stdout regardless.
+            let list = crate::finding::run_any("pacman", &["-Qu"])?;
             Some((list.lines().filter(|l| !l.trim().is_empty()).count(), None, "sudo pacman -Syu"))
         }
         Pm::Zypper => {
@@ -82,8 +83,16 @@ pub fn updates() -> Option<(usize, Option<usize>, &'static str)> {
 pub fn reboot_needed() -> Option<bool> {
     match detect()? {
         Pm::Apt => Some(Path::new("/var/run/reboot-required").exists()),
-        // needs-restarting -r: exit 1 = reboot needed (dnf-utils / dnf5 plugin)
-        Pm::Dnf => Command::new("dnf").args(["needs-restarting", "-r"]).stdout(Stdio::null()).stderr(Stdio::null()).status().ok()?.code().map(|c| c == 1),
+        // needs-restarting -r (dnf-plugins-core / dnf5 plugin): exit 0 = no reboot, 1 = reboot. Without
+        // the plugin dnf also exits 1 ("No such command"), so 1 counts only with the plugin's message.
+        Pm::Dnf => {
+            let out = Command::new("dnf").args(["needs-restarting", "-r"]).stdin(Stdio::null()).output().ok()?;
+            match out.status.code()? {
+                0 => Some(false),
+                1 => String::from_utf8_lossy(&out.stdout).to_lowercase().contains("reboot is required").then_some(true),
+                _ => None,
+            }
+        }
         // Arch removes the running kernel's modules on upgrade
         // (no modules at all = container or foreign kernel: can't tell)
         Pm::Pacman => {

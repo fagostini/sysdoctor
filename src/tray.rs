@@ -270,6 +270,13 @@ pub fn run(checks: fn() -> (Vec<Finding>, Vec<Finding>)) -> io::Result<()> {
     }
 }
 
+/// One Exec= argument per the Desktop Entry spec: double-quoted with \" ` $ \\ backslash-escaped,
+/// then the value's own escaping (\\ doubled again) and %% for a literal %.
+fn desktop_quote(s: &str) -> String {
+    let arg = s.replace('\\', "\\\\").replace('"', "\\\"").replace('`', "\\`").replace('$', "\\$");
+    format!("\"{}\"", arg.replace('\\', "\\\\").replace('%', "%%"))
+}
+
 /// Start the tray at login (XDG autostart) and right now, detached from this terminal.
 pub fn install() -> io::Result<()> {
     let exe = crate::finding::exe()?;
@@ -282,8 +289,8 @@ pub fn install() -> io::Result<()> {
     fs::write(
         &file,
         format!(
-            "[Desktop Entry]\nType=Application\nName=sysdoctor\nComment=System health status icon\nExec=\"{}\" tray\nIcon=utilities-system-monitor\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
-            exe.display()
+            "[Desktop Entry]\nType=Application\nName=sysdoctor\nComment=System health status icon\nExec={} tray\nIcon=utilities-system-monitor\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+            desktop_quote(&exe.to_string_lossy())
         ),
     )?;
     println!("Installed {}", file.display());
@@ -295,6 +302,12 @@ pub fn install() -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_quoting() {
+        assert_eq!(desktop_quote("/usr/bin/sysdoctor"), r#""/usr/bin/sysdoctor""#);
+        assert_eq!(desktop_quote(r#"/a b/100%/x"$y"#), r#""/a b/100%%/x\\"\\$y""#);
+    }
 
     #[test]
     fn heart_pixels() {

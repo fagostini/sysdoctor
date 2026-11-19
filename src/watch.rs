@@ -211,8 +211,7 @@ pub fn trends() -> io::Result<()> {
     if samples.len() < 2 {
         println!("Not enough history yet ({} sample). The timer (`sysdoctor watch --install`) records one daily.", samples.len());
         // smartctl needs root and the timer runs as you, so wear is only tracked if the history was recorded as root
-        let root = fs::metadata("/proc/self").is_ok_and(|m| std::os::unix::fs::MetadataExt::uid(&m) == 0);
-        if !root {
+        if !crate::finding::is_root() {
             match crate::finding::run("smartctl", &["--version"]) {
                 None => println!("Disk wear is not tracked: install smartmontools ({}).", crate::pkg::install("smartmontools")),
                 Some(_) => println!("Disk wear is not tracked: smartctl needs root, and the timer runs as your user."),

@@ -118,10 +118,11 @@ const TOKENS: &[(&str, usize, &str)] = &[
     ("AIza", 35, "Google API key"),
 ];
 
-/// First secret-looking token in a line, by label. Never returns the secret itself.
-fn find_secret(line: &str) -> Option<&'static str> {
+/// First secret-looking token in a line: (label, sed ERE matching lines with that token format).
+/// Never returns the secret itself.
+fn find_secret(line: &str) -> Option<(&'static str, String)> {
     if line.contains("PRIVATE KEY-----") {
-        return Some("private key");
+        return Some(("private key", "PRIVATE KEY-----".into()));
     }
     let is_tok = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
     for &(prefix, min, label) in TOKENS {
@@ -129,7 +130,8 @@ fn find_secret(line: &str) -> Option<&'static str> {
             let boundary = line[..i].chars().next_back().is_none_or(|c| !c.is_ascii_alphanumeric());
             let tail = line[i + prefix.len()..].chars().take_while(|&c| is_tok(c)).count();
             if boundary && tail >= min {
-                return Some(label);
+                // same rule as above: no letter/digit before the prefix, at least `min` token chars after
+                return Some((label, format!("(^|[^A-Za-z0-9]){prefix}[A-Za-z0-9_-]{{{min}}}")));
             }
         }
     }
@@ -144,24 +146,37 @@ pub fn history_secrets() -> Vec<Finding> {
         let p = h.join(rel);
         let Ok(bytes) = fs::read(&p) else { continue };
         let text = String::from_utf8_lossy(&bytes); // zsh history can contain non-UTF8 metafied bytes
-        let hits: Vec<(usize, &str)> = text.lines().enumerate().filter_map(|(i, l)| Some((i + 1, find_secret(l)?))).collect();
+        let hits: Vec<(usize, (&str, String))> = text.lines().enumerate().filter_map(|(i, l)| Some((i + 1, find_secret(l)?))).collect();
         if hits.is_empty() {
             continue;
         }
-        let mut labels: Vec<&str> = hits.iter().map(|(_, l)| *l).collect();
+        let mut labels: Vec<&str> = hits.iter().map(|(_, (l, _))| *l).collect();
         labels.sort();
         labels.dedup();
+        let mut res: Vec<&str> = hits.iter().map(|(_, (_, r))| r.as_str()).collect();
+        res.sort();
+        res.dedup();
         let lines: Vec<String> = hits.iter().map(|(n, _)| n.to_string()).collect();
         out.push(
             Finding::new("secrets", Severity::Warn, format!("~/{rel}: {} secret(s) in history ({})", hits.len(), labels.join(", ")))
-                .detail(format!("Lines {}. Revoke/rotate them first: history files get backed up and synced.", lines.join(", ")))
-                .cmd(format!("sed -i '{}' ~/{rel}", lines.iter().map(|n| format!("{n}d")).collect::<Vec<_>>().join(";"))),
+                .detail(format!(
+                    "Lines {}. Revoke/rotate them first: history files get backed up and synced. Open shells may write their history back on exit.",
+                    lines.join(", ")
+                ))
+                .cmd(delete_lines_cmd(&format!("~/{rel}"), &res)),
         );
     }
     if out.is_empty() {
         out.push(Finding::ok("secrets", "No known token formats in shell history"));
     }
     out
+}
+
+/// Delete every line matching one of these EREs. By pattern, not line number: shells rewrite
+/// history files (dedup, shared history) between the scan and the click. LC_ALL=C: zsh history
+/// holds non-UTF-8 bytes. The patterns describe token formats and never contain a secret.
+fn delete_lines_cmd(file: &str, res: &[&str]) -> String {
+    format!("LC_ALL=C sed -i -E {} {file}", res.iter().map(|r| format!("-e '/{r}/d'")).collect::<Vec<_>>().join(" "))
 }
 
 // ---- expiry ----
@@ -257,13 +272,37 @@ mod tests {
 
     #[test]
     fn secrets() {
+        let label = |l: &str| find_secret(l).map(|(l, _)| l);
         let gh = format!("export GITHUB_TOKEN=ghp_{}", "a".repeat(36));
-        assert_eq!(find_secret(&gh), Some("GitHub token"));
-        assert_eq!(find_secret(&format!("curl -H 'x-api-key: sk-ant-{}'", "b".repeat(40))), Some("Anthropic API key"));
-        assert_eq!(find_secret("echo ghp_short"), None); // too short
-        assert_eq!(find_secret(&format!("myghp_{}", "a".repeat(36))), None); // no word boundary
-        assert_eq!(find_secret("git commit -m 'fix AKIA docs'"), None);
-        assert_eq!(find_secret("ls -la"), None);
+        assert_eq!(label(&gh), Some("GitHub token"));
+        assert_eq!(label(&format!("curl -H 'x-api-key: sk-ant-{}'", "b".repeat(40))), Some("Anthropic API key"));
+        assert_eq!(label("echo ghp_short"), None); // too short
+        assert_eq!(label(&format!("myghp_{}", "a".repeat(36))), None); // no word boundary
+        assert_eq!(label("git commit -m 'fix AKIA docs'"), None);
+        assert_eq!(label("ls -la"), None);
+    }
+
+    /// The generated sed deletes exactly the lines the scan flags, wherever they moved to.
+    #[test]
+    fn secret_removal() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("hist");
+        let lines = [
+            format!("export T=ghp_{}", "a".repeat(36)),
+            "echo ghp_short".to_string(),
+            format!("myghp_{}", "a".repeat(36)),
+            format!("aws AKIA{} x", "Z".repeat(16)),
+            "-----BEGIN OPENSSH PRIVATE KEY-----".to_string(),
+        ];
+        // plus a non-UTF-8 line, as zsh's metafied history has
+        fs::write(&f, [(lines.join("\n") + "\n").as_bytes(), b"ls \xff\n"].concat()).unwrap();
+        let mut res: Vec<String> = lines.iter().filter_map(|l| Some(find_secret(l)?.1)).collect();
+        res.dedup();
+        let res: Vec<&str> = res.iter().map(String::as_str).collect();
+        let cmd = delete_lines_cmd(&crate::finding::sh_quote(&f.to_string_lossy()), &res);
+        assert!(std::process::Command::new("sh").args(["-c", &cmd]).status().unwrap().success());
+        let want = format!("echo ghp_short\nmyghp_{}\nls \u{fffd}\n", "a".repeat(36));
+        assert_eq!(String::from_utf8_lossy(&fs::read(&f).unwrap()), want);
     }
 
     #[test]
