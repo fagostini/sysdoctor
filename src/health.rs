@@ -71,6 +71,9 @@ fn backups() -> Vec<(&'static str, Option<u64>, String)> {
             None => out.push(("Kopia", None, "repository not reachable (offline, or password not stored)".into())),
         }
     }
+    out.extend(restic());
+    out.extend(borg(&home));
+    out.extend(snapper());
     // Déjà Dup records its last run in gsettings.
     if let Some(s) = run("gsettings", &["get", "org.gnome.DejaDup", "last-backup"]) {
         let s = s.trim().trim_matches('\'');
@@ -79,6 +82,85 @@ fn backups() -> Vec<(&'static str, Option<u64>, String)> {
         }
     }
     out
+}
+
+/// Largest string value under `key` anywhere in a JSON tree (restic "time", borg "time", snapper "date").
+/// ponytail: string max assumes one UTC offset across snapshots; parse each if mixed offsets ever matter.
+pub fn newest(v: &serde_json::Value, key: &str) -> Option<String> {
+    use serde_json::Value;
+    match v {
+        Value::Array(a) => a.iter().filter_map(|x| newest(x, key)).max(),
+        Value::Object(o) => {
+            let own = o.get(key).and_then(Value::as_str).filter(|s| !s.is_empty()).map(String::from);
+            o.values().filter_map(|x| newest(x, key)).chain(own).max()
+        }
+        _ => None,
+    }
+}
+
+/// Newest mtime of the entries directly in `dir`.
+fn newest_mtime(dir: &Path) -> Option<u64> {
+    fs::read_dir(dir).ok()?.flatten().filter_map(|e| mtime(&e.path())).max()
+}
+
+/// Local repo path from a restic/borg repository string, if it is local.
+fn local_repo(repo: &str) -> Option<PathBuf> {
+    let p = repo.strip_prefix("local:").or_else(|| repo.strip_prefix("file://")).unwrap_or(repo);
+    p.starts_with('/').then(|| PathBuf::from(p))
+}
+
+/// restic via $RESTIC_REPOSITORY(_FILE). Local repos: newest file in snapshots/ (no password needed).
+fn restic() -> Option<(&'static str, Option<u64>, String)> {
+    let repo = std::env::var("RESTIC_REPOSITORY")
+        .ok()
+        .or_else(|| fs::read_to_string(std::env::var_os("RESTIC_REPOSITORY_FILE")?).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    if let Some(dir) = local_repo(&repo) {
+        return Some(("restic", newest_mtime(&dir.join("snapshots")), String::new()));
+    }
+    let has_pw = ["RESTIC_PASSWORD", "RESTIC_PASSWORD_FILE", "RESTIC_PASSWORD_COMMAND"].iter().any(|k| std::env::var_os(k).is_some());
+    let list = has_pw.then(|| run("timeout", &["30", "restic", "snapshots", "--json", "--no-lock"])).flatten();
+    Some(match list {
+        Some(j) => ("restic", newest(&serde_json::from_str(&j).unwrap_or_default(), "time").and_then(|t| epoch(&t)), String::new()),
+        None => ("restic", None, "repository not reachable (offline, or no password in the environment)".into()),
+    })
+}
+
+/// borg via borgmatic config or $BORG_REPO. Local repos: borg rewrites index.* on every commit.
+fn borg(home: &Path) -> Option<(&'static str, Option<u64>, String)> {
+    let borgmatic = [home.join(".config/borgmatic/config.yaml"), PathBuf::from("/etc/borgmatic/config.yaml")].into_iter().any(|p| p.exists());
+    if borgmatic {
+        let j = run("timeout", &["60", "borgmatic", "list", "--last", "1", "--json"]);
+        let t = j.and_then(|j| newest(&serde_json::from_str(&j).ok()?, "time")).and_then(|t| epoch(&t));
+        let note = if t.is_none() { "borgmatic list failed (repository offline, or config needs root)" } else { "" };
+        return Some(("borgmatic", t, note.into()));
+    }
+    let repo = std::env::var("BORG_REPO").ok().filter(|s| !s.is_empty())?;
+    if let Some(dir) = local_repo(&repo) {
+        let t = fs::read_dir(&dir).ok().map(|d| d.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("index.")).filter_map(|e| mtime(&e.path())).max());
+        return Some(("borg", t.flatten(), String::new()));
+    }
+    let j = run("timeout", &["30", "borg", "list", "--last", "1", "--json"]);
+    Some(match j.and_then(|j| newest(&serde_json::from_str(&j).ok()?, "time")).and_then(|t| epoch(&t)) {
+        Some(t) => ("borg", Some(t), String::new()),
+        None => ("borg", None, "repository not reachable (offline, or no passphrase in the environment)".into()),
+    })
+}
+
+/// snapper: newest snapshot across configs. These live on the same filesystem.
+fn snapper() -> Vec<(&'static str, Option<u64>, String)> {
+    let configs: Vec<String> = fs::read_dir("/etc/snapper/configs").into_iter().flatten().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    configs
+        .into_iter()
+        .map(|c| match run("snapper", &["--jsonout", "-c", &c, "list"]) {
+            Some(j) => {
+                let t = newest(&serde_json::from_str(&j).unwrap_or_default(), "date").and_then(|t| epoch(&t));
+                ("snapper", t, format!("config {c}; snapshots are on the same disk: they won't survive a disk failure"))
+            }
+            None => ("snapper", None, format!("can't list config {c}: add your user to ALLOW_USERS in /etc/snapper/configs/{c}")),
+        })
+        .collect()
 }
 
 /// Newest /var/log/timeshift/YYYY-MM-DD_HH-MM-SS_backup.log, as a timestamp.
@@ -97,7 +179,7 @@ pub fn backup() -> Vec<Finding> {
     let found = backups();
     if found.is_empty() {
         return vec![Finding::new("backup", Severity::Warn, "No backups detected")
-            .detail("Checked Timeshift, Kopia and Déjà Dup. Using restic/borg? Add a checks.d plugin, then `sysdoctor ignore \"no backups\"`.")];
+            .detail("Checked Timeshift, Kopia, restic ($RESTIC_REPOSITORY), borg ($BORG_REPO or borgmatic), snapper and Déjà Dup. Something else? Add a checks.d plugin, then `sysdoctor ignore \"no backups\"`.")];
     }
     found
         .into_iter()
@@ -226,6 +308,19 @@ pub fn firmware() -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backup_json() {
+        let restic: serde_json::Value = serde_json::from_str(r#"[{"time":"2024-05-01T10:00:00Z"},{"time":"2024-06-02T09:00:00Z"}]"#).unwrap();
+        assert_eq!(newest(&restic, "time").as_deref(), Some("2024-06-02T09:00:00Z"));
+        let borgmatic: serde_json::Value = serde_json::from_str(r#"[{"repository":{"last_modified":"x"},"archives":[{"name":"a","time":"2024-07-01T03:00:00.000000"}]}]"#).unwrap();
+        assert_eq!(newest(&borgmatic, "time").as_deref(), Some("2024-07-01T03:00:00.000000"));
+        let snapper: serde_json::Value = serde_json::from_str(r#"{"root":[{"number":0,"date":""},{"number":5,"date":"2024-08-01 12:00:00"}]}"#).unwrap();
+        assert_eq!(newest(&snapper, "date").as_deref(), Some("2024-08-01 12:00:00"));
+        assert_eq!(local_repo("local:/mnt/b"), Some(PathBuf::from("/mnt/b")));
+        assert_eq!(local_repo("sftp:host:/b"), None);
+        assert_eq!(local_repo("ssh://u@h/./repo"), None);
+    }
 
     #[test]
     fn normalize_groups_variants() {

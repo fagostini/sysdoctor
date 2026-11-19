@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 pub const SCANNERS: &[fn(&Path) -> Vec<Finding>] =
-    &[projects, pkg_caches, ai_caches, stale_caches, user_trash, pkg_cache, old_kernels, docker, journal, snap, flatpak];
+    &[projects, pkg_caches, ai_caches, stale_caches, user_trash, pkg_cache, old_kernels, containers, conda, journal, snap, flatpak];
 
 const MIN: u64 = 50 << 20; // ignore anything smaller than 50M
 
@@ -133,6 +133,8 @@ const PKG_CACHES: &[(&str, &str)] = &[
     (".local/share/pnpm/store", "pnpm store"),
     (".cache/go-build", "Go build cache"),
     (".gradle/caches", "Gradle cache"),
+    (".m2/repository", "Maven repository"),
+    (".cache/ms-playwright", "Playwright browsers"),
     (".cache/thumbnails", "thumbnail cache"),
 ];
 
@@ -158,7 +160,7 @@ fn pkg_caches(home: &Path) -> Vec<Finding> {
 /// ~/.cache subfolders nothing has written to in `cache_stale_days`. Review items: apps sometimes keep state there.
 fn stale_caches(home: &Path) -> Vec<Finding> {
     let cache = home.join(".cache");
-    let covered = ["pip", "yarn", "go-build", "thumbnails", "huggingface", "torch"];
+    let covered = ["pip", "yarn", "go-build", "thumbnails", "huggingface", "torch", "ms-playwright"];
     let paths: Vec<PathBuf> = fs::read_dir(&cache)
         .into_iter()
         .flatten()
@@ -284,14 +286,37 @@ fn user_trash(home: &Path) -> Vec<Finding> {
     vec![f]
 }
 
-fn docker(_: &Path) -> Vec<Finding> {
-    let Some(s) = run("docker", &["system", "df", "--format", "{{.Type}}\t{{.Reclaimable}}"]) else { return vec![] };
-    // Reclaimable looks like "1.2GB (30%)"
-    let b: u64 = s.lines().filter_map(|l| parse_size(l.split('\t').nth(1)?.split_whitespace().next()?)).sum();
-    if b == 0 {
+/// Docker and Podman: same `system df` template and prune command.
+fn containers(_: &Path) -> Vec<Finding> {
+    [("docker", "Docker"), ("podman", "Podman")]
+        .into_iter()
+        .filter_map(|(bin, label)| {
+            let s = run(bin, &["system", "df", "--format", "{{.Type}}\t{{.Reclaimable}}"])?;
+            // Reclaimable looks like "1.2GB (30%)"
+            let b: u64 = s.lines().filter_map(|l| parse_size(l.split('\t').nth(1)?.split_whitespace().next()?)).sum();
+            let mut f = Finding::new(bin, Severity::Ok, format!("{label} unused images/containers/cache")).cmd(format!("{bin} system prune"));
+            f.bytes = Some(b);
+            (b > 0).then_some(f)
+        })
+        .collect()
+}
+
+/// Bytes `conda clean --all` would free, from its --dry-run --json output.
+pub fn conda_reclaimable(json: &str) -> u64 {
+    let v: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
+    ["packages", "tarballs"].iter().filter_map(|k| v[k]["total_size"].as_u64()).sum()
+}
+
+/// conda's package cache: ask conda itself, since envs hardlink into pkgs/ and only unused packages free space.
+fn conda(home: &Path) -> Vec<Finding> {
+    let candidates = ["miniconda3", "anaconda3", "miniforge3", "mambaforge"].map(|d| home.join(d).join("bin/conda"));
+    let Some(exe) = std::env::var_os("CONDA_EXE").map(PathBuf::from).into_iter().chain(candidates).find(|p| p.is_file()) else { return vec![] };
+    let Some(j) = run(&exe.to_string_lossy(), &["clean", "--all", "--dry-run", "--json"]) else { return vec![] };
+    let b = conda_reclaimable(&j);
+    if b < MIN {
         return vec![];
     }
-    let mut f = Finding::new("docker", Severity::Ok, "Docker unused images/containers/cache").cmd("docker system prune");
+    let mut f = Finding::new("conda", Severity::Ok, "conda unused packages and tarballs").cmd(format!("'{}' clean --all -y", exe.display()));
     f.bytes = Some(b);
     vec![f]
 }
@@ -362,6 +387,13 @@ fn flatpak(_: &Path) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conda_dry_run() {
+        let j = r#"{"index_cache": null, "logfiles": [], "packages": {"pkg_sizes": {}, "total_size": 898012430}, "success": true, "tarballs": {"total_size": 68347180}}"#;
+        assert_eq!(conda_reclaimable(j), 966359610);
+        assert_eq!(conda_reclaimable("not json"), 0);
+    }
     use std::process::Command;
 
     fn set_old(p: &Path) {

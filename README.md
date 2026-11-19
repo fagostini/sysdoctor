@@ -87,7 +87,7 @@ sysdoctor completions zsh > ~/.zfunc/_sysdoctor     # or bash, fish, elvish, pow
 | Memory | OOM kills this boot, sustained memory pressure (PSI) |
 | Security | Firewall active, SSH password login, permissions on `~/.ssh`, `~/.gnupg` and private keys, known API token formats in shell history |
 | Expiry | Your GPG keys, SSH certificates, Let's Encrypt and configured certificates expiring within 30 days |
-| Backups | Last Timeshift, Kopia or Déjà Dup backup older than 7 days, or no backups at all |
+| Backups | Last Timeshift, Kopia, restic, borg/borgmatic, snapper or Déjà Dup backup older than 7 days, or no backups at all |
 | Hardware | Battery health, CPU thermal throttling, missing firmware |
 | Logs | Error messages this boot, grouped by pattern, highlighting the ones that are new since last boot |
 | Time | NTP sync |
@@ -162,13 +162,13 @@ Lists reclaimable space, largest first. By default it is a **dry run** and chang
 | Category | Found when | `--apply` |
 |---|---|---|
 | Rust `target/`, `node_modules` | Project untouched for 30+ days and no uncommitted git changes | Trashed |
-| Package caches | pip, cargo, npm, yarn, pnpm, Go, Gradle caches and thumbnails over 50 MB | Trashed |
+| Package caches | pip, cargo, npm, yarn, pnpm, Go, Gradle, Maven caches, Playwright browsers and thumbnails over 50 MB | Trashed |
 | AI model caches | Hugging Face, Ollama, torch over 100 MB | Command offered (re-downloading is slow) |
 | Stale `~/.cache` folders | Nothing written for 90+ days | Command offered (some apps keep state there) |
 | Trash | Over 10 MB | `gio trash --empty` offered |
 | Package cache | Downloaded packages (apt, dnf, pacman, zypper) | The distro's clean command offered (`apt clean`, `dnf clean packages`, `paccache -rk2`, `zypper clean`) |
 | Old kernels | All but the newest two and the running one (apt, dnf, zypper; Arch keeps one) | `apt purge <packages>`, `dnf remove --oldinstallonly` or `zypper purge-kernels` offered |
-| Docker, journal, snap, flatpak | Reclaimable images, journal over 500 MB, disabled snap revisions, unused runtimes | Their cleanup commands offered |
+| Docker, Podman, conda, journal, snap, flatpak | Reclaimable images, journal over 500 MB, disabled snap revisions, unused runtimes | Their cleanup commands offered |
 
 `--apply` first shows every folder it will move to the trash and asks once. It then offers each cleanup command individually. Trashed files still use disk space until you empty the trash.
 
@@ -292,7 +292,7 @@ Put any executable in `~/.config/sysdoctor/checks.d/`. It runs on every `check` 
 - **First line of output:** the title
 - **Remaining lines:** the detail
 
-Example, warning when a restic backup is more than 2 days old:
+Example, a stricter restic check (warn after 2 days instead of `backup_max_days`):
 
 ```sh
 #!/bin/sh
@@ -366,6 +366,7 @@ Adding a check means writing one `fn() -> Vec<Finding>` and listing it in `CHECK
 
 ### Known limits
 
+- restic and borg are found through `$RESTIC_REPOSITORY` / `$BORG_REPO` (or a borgmatic config). Local repositories are read without a password; remote ones need the password in the environment, otherwise they show as "not reachable". snapper needs your user in `ALLOW_USERS`.
 - Package checks detect apt, dnf, pacman or zypper. They read cached metadata only (no network, no root), so counts are as fresh as the last refresh. Pending reboot on Fedora needs `dnf needs-restarting` (dnf-utils). The .deb package and `x-terminal-emulator` fallback are Debian-family only.
 - The project scan skips folders whose names start with `.`, so a project kept in a hidden folder will not be found.
 - `growth` tracks only the top level of your home folder.
