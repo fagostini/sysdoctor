@@ -1,4 +1,4 @@
-use crate::finding::{human, run, run_any, xdg, Finding, Severity};
+use crate::finding::{human, run, run_any, sh_quote, xdg, Finding, Severity};
 use std::collections::HashSet;
 use std::fs;
 use std::io::Read;
@@ -121,7 +121,7 @@ fn disks() -> Vec<Finding> {
                 out.push(
                     Finding::new("inodes", isev, format!("{mp} inodes {ip:.0}% used"))
                         .detail("Too many small files; writes fail even with free space")
-                        .cmd(format!("sudo du --inodes -x {mp} | sort -n | tail")),
+                        .cmd(format!("sudo du --inodes -x {} | sort -n | tail", sh_quote(&mp))),
                 );
             }
         }
@@ -157,7 +157,7 @@ fn smart() -> Vec<Finding> {
             Some(false) => out.push(
                 Finding::new("smart", Severity::Crit, format!("{dev} SMART health FAILED"))
                     .detail("Disk predicts its own failure. Back up now.")
-                    .cmd(format!("sudo smartctl -a {dev}")),
+                    .cmd(format!("sudo smartctl -a {}", sh_quote(&dev))),
             ),
             Some(true) => {}
             None => {
@@ -181,7 +181,7 @@ fn failed_units() -> Vec<Finding> {
             let flag = if scope == "user" { "--user " } else { "" };
             out.push(
                 Finding::new("failed-unit", Severity::Warn, format!("{scope} unit {unit} failed"))
-                    .cmd(format!("journalctl {flag}-u {unit} -b -n 50")),
+                    .cmd(format!("journalctl {flag}-u {} -b -n 50", sh_quote(unit))),
             );
         }
     }

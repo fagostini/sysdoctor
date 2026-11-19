@@ -31,7 +31,7 @@ pub struct Finding {
 
 impl Finding {
     pub fn new(id: &'static str, severity: Severity, title: impl Into<String>) -> Self {
-        Finding { id, severity, title: title.into(), detail: String::new(), bytes: None, fix: None }
+        Finding { id, severity, title: printable(&title.into()), detail: String::new(), bytes: None, fix: None }
     }
     pub fn ok(id: &'static str, title: impl Into<String>) -> Self {
         Self::new(id, Severity::Ok, title)
@@ -40,7 +40,11 @@ impl Finding {
         Self::new(id, Severity::Ok, format!("skipped: {}", reason.into()))
     }
     pub fn detail(mut self, d: impl Into<String>) -> Self {
-        self.detail = d.into();
+        self.detail = printable(&d.into());
+        self
+    }
+    pub fn bytes(mut self, b: u64) -> Self {
+        self.bytes = Some(b);
         self
     }
     pub fn cmd(mut self, c: impl Into<String>) -> Self {
@@ -74,8 +78,24 @@ pub fn exe() -> std::io::Result<PathBuf> {
 /// `sudo <full path to this binary> <args>`: sudo's secure_path usually lacks ~/.cargo/bin.
 pub fn sudo_self(args: &str) -> String {
     let exe = exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "sysdoctor".into());
-    let exe = if exe.contains(' ') { format!("'{exe}'") } else { exe };
-    format!("sudo {exe} {args}")
+    format!("sudo {} {args}", sh_quote(&exe))
+}
+
+/// Quote one word for `sh -c`. Every path or name that goes into a fix command must pass through
+/// here: they come from the filesystem, logs or other programs, and may hold `'`, `;` or `$(…)`.
+/// Plain words stay unquoted so commands read naturally.
+pub fn sh_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=:,@%".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// Control characters (terminal escapes, \r) replaced, newlines and tabs kept. For anything
+/// printed to a terminal: log lines, key names and file names can carry escape sequences.
+pub fn printable(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() && c != '\n' && c != '\t' { '?' } else { c }).collect()
 }
 
 /// XDG base dir: $var if set and absolute, else $HOME/fallback.
@@ -127,5 +147,17 @@ mod tests {
         assert_eq!(parse_size("abc"), None);
         assert_eq!(human(1536), "1.5K");
         assert_eq!(human(10), "10B");
+    }
+
+    #[test]
+    fn quoting() {
+        assert_eq!(sh_quote("/dev/sda"), "/dev/sda");
+        assert_eq!(sh_quote("a b"), "'a b'");
+        assert_eq!(sh_quote(""), "''");
+        let evil = "x'; touch PWNED; echo '$(id)";
+        let out = Command::new("sh").args(["-c", &format!("printf %s {}", sh_quote(evil))]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), evil);
+        assert_eq!(printable("a\x1b]0;x\x07b\nc\td\r"), "a?]0;x?b\nc\td?");
+        assert_eq!(Finding::ok("t", "x\x1b[2J").title, "x?[2J");
     }
 }

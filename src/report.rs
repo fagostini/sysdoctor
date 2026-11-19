@@ -32,11 +32,12 @@ fn gpus() -> Vec<String> {
         .collect()
 }
 
-/// Replace identifying strings: home path, user name, host name, IPv4 and MAC addresses.
-fn scrub(text: &str, home: &str, user: &str, host: &str) -> String {
+/// Replace identifying strings: home path, user name, host names, IPv4/IPv6, MAC and email addresses.
+fn scrub(text: &str, home: &str, user: &str, hosts: &[&str]) -> String {
     let mut s = text.to_string();
     // longest first, so a host name containing the user name is replaced whole
-    let mut names = [(home, "~"), (user, "<user>"), (host, "<host>")];
+    let mut names = vec![(home, "~"), (user, "<user>")];
+    names.extend(hosts.iter().map(|h| (*h, "<host>")));
     names.sort_by_key(|(n, _)| std::cmp::Reverse(n.len()));
     for (needle, repl) in names {
         if needle.len() >= 2 {
@@ -51,6 +52,18 @@ fn scrub(text: &str, home: &str, user: &str, host: &str) -> String {
         let p: Vec<&str> = t.split(':').collect();
         p.len() == 6 && p.iter().all(|x| x.len() == 2 && x.chars().all(|c| c.is_ascii_hexdigit()))
     };
+    // "::" or all 8 groups, so times like 12:30:45 don't match
+    let ip6 = |t: &str| {
+        let p: Vec<&str> = t.split(':').collect();
+        (t.contains("::") || p.len() == 8)
+            && (3..=8).contains(&p.len())
+            && p.iter().all(|x| x.len() <= 4 && x.chars().all(|c| c.is_ascii_hexdigit()))
+            && p.iter().any(|x| !x.is_empty())
+    };
+    let email = |t: &str| {
+        t.split_once('@').is_some_and(|(l, d)| !l.is_empty() && d.contains('.') && !d.starts_with('.'))
+            && t.chars().all(|c| c.is_ascii_alphanumeric() || "._%+-@".contains(c))
+    };
     s.lines()
         .map(|line| {
             // keep separators; only whole tokens (trimmed of punctuation) are tested
@@ -58,10 +71,14 @@ fn scrub(text: &str, home: &str, user: &str, host: &str) -> String {
                 .map(|tok| {
                     let core = tok.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '.' && c != ':');
                     let core = core.trim_end_matches(['.', ':']);
-                    if ip(core) {
-                        tok.replace(core, "<ip>")
+                    // address without its /prefix-length or %interface suffix
+                    let addr = core.split(['/', '%']).next().unwrap_or(core);
+                    if ip(addr) || ip6(addr) {
+                        tok.replace(addr, "<ip>")
                     } else if mac(core) {
                         tok.replace(core, "<mac>")
+                    } else if email(core) {
+                        tok.replace(core, "<email>")
                     } else {
                         tok.to_string()
                     }
@@ -116,8 +133,9 @@ pub fn report(findings: &[Finding]) -> String {
     o += "\n";
     let home = std::env::var("HOME").unwrap_or_default();
     let user = std::env::var("USER").unwrap_or_default();
-    let host = fs::read_to_string("/etc/hostname").unwrap_or_default().trim().to_string();
-    scrub(&o, &home, &user, &host)
+    // the running host name can differ from /etc/hostname (hostnamectl --transient, DHCP)
+    let hosts = ["/etc/hostname", "/proc/sys/kernel/hostname"].map(|p| fs::read_to_string(p).unwrap_or_default().trim().to_string());
+    scrub(&o, &home, &user, &hosts.each_ref().map(String::as_str))
 }
 
 // ---- startup ----
@@ -197,7 +215,10 @@ mod tests {
     #[test]
     fn scrub_identifiers() {
         let t = "path /home/fed/x on host fedbox, ip 192.168.1.20, gw (10.0.0.1) mac aa:bb:cc:dd:ee:ff: user fed\nversion 6.8.0 ok";
-        let s = scrub(t, "/home/fed", "fed", "fedbox");
+        let s = scrub(t, "/home/fed", "fed", &["fedbox", ""]);
         assert_eq!(s, "path ~/x on host <host>, ip <ip>, gw (<ip>) mac <mac>: user <user>\nversion 6.8.0 ok");
+        let t = "addr fe80::1c2b:3aff:fe4d:5e6f%wlp2s0 net 2001:db8:0:0:0:0:0:1/64 v4 10.1.2.3/24 at 12:30:45 by <bob@example.org>, std::io";
+        let s = scrub(t, "/home/fed", "fed", &["laptop"]);
+        assert_eq!(s, "addr <ip>%wlp2s0 net <ip>/64 v4 <ip>/24 at 12:30:45 by <<email>>, std::io");
     }
 }

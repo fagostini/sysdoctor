@@ -1,5 +1,5 @@
 //! `sysdoctor gui`: GTK4 window with the full report, fix buttons, ignore, cleanup and copy-report.
-use crate::finding::{human, Finding, Fix, Severity};
+use crate::finding::{human, printable, sh_quote, Finding, Fix, Severity};
 use crate::{config, report};
 use gtk::{gio, glib};
 use gtk4 as gtk;
@@ -69,14 +69,6 @@ fn sev_class(s: Severity) -> (&'static str, &'static str) {
         Severity::Warn => ("dialog-warning-symbolic", "warn"),
         Severity::Ok => ("emblem-ok-symbolic", "ok"),
     }
-}
-
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn short(s: &str) -> String {
-    if s.chars().count() > 160 { s.chars().take(160).collect::<String>() + "…" } else { s.to_string() }
 }
 
 fn build(app: &gtk::Application, checks: Checks, cleanups: Cleanups) {
@@ -291,7 +283,7 @@ impl Ui {
             l.add_css_class("cmd");
             l.set_lines(6);
             l.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            l.set_tooltip_text(Some(&short(&code)));
+            l.set_tooltip_text(Some(&code));
             body.append(&cap);
             body.append(&l);
         }
@@ -405,7 +397,8 @@ impl Ui {
         }
         if !cmds.is_empty() {
             detail += "\nRun:\n";
-            cmds.iter().for_each(|c| detail += &format!("  {}\n", short(c)));
+            // in full: what is confirmed must be exactly what runs
+            cmds.iter().for_each(|c| detail += &format!("  {}\n", printable(c)));
         }
         let ask = gtk::AlertDialog::builder()
             .modal(true)
@@ -432,7 +425,7 @@ impl Ui {
             return;
         }
         // echo each command, stop at the first failure; child-exited re-checks
-        let script = cmds.iter().map(|c| format!("printf '\\033[1;36m$ %s\\033[0m\\n' {} && {c}", sh_quote(&short(c)))).collect::<Vec<_>>().join(" && ");
+        let script = cmds.iter().map(|c| format!("printf '\\033[1;36m$ %s\\033[0m\\n' {} && {c}", sh_quote(&printable(c)))).collect::<Vec<_>>().join(" && ");
         self.term_pane.set_visible(true);
         self.running.set(true);
         self.status.set_text("Running in terminal below…");

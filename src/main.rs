@@ -12,7 +12,7 @@ mod tray;
 mod watch;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use finding::{human, Finding, Fix, Severity};
+use finding::{human, printable, Finding, Fix, Severity};
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
@@ -136,7 +136,7 @@ fn render(findings: &[Finding]) {
             println!("         {l}");
         }
         match &f.fix {
-            Some(Fix::Command(c)) => println!("         fix: {c}"),
+            Some(Fix::Command(c)) => println!("         fix: {}", printable(c)),
             Some(Fix::Trash(_)) => println!("         fix: sysdoctor clean --apply"),
             None => {}
         }
@@ -168,7 +168,7 @@ fn run_fixes<'a>(findings: impl Iterator<Item = &'a Finding>) {
     for f in findings {
         let Some(Fix::Command(cmd)) = &f.fix else { continue };
         println!("\n{}", f.title);
-        if !confirm(&format!("  Run `{cmd}`?")) {
+        if !confirm(&format!("  Run `{}`?", printable(cmd))) {
             continue;
         }
         match Command::new("sh").args(["-c", cmd]).status() {
@@ -325,7 +325,7 @@ fn clean_apply(findings: &[Finding]) -> ExitCode {
         .collect();
     if !paths.is_empty() {
         println!("\nWill move to trash:");
-        paths.iter().for_each(|p| println!("  {}", p.display()));
+        paths.iter().for_each(|p| println!("  {}", printable(&p.to_string_lossy())));
         if confirm("Proceed?") {
             match trash::delete_all(&paths) {
                 Ok(()) => println!("Trashed {} paths. Empty the trash to actually free the space.", paths.len()),
