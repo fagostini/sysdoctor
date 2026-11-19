@@ -50,6 +50,9 @@ fn notify(new: &[&Finding]) {
         return;
     }
     let (urgency, title, body) = summary(new);
+    // notification servers render body markup; titles and details carry log text and file names
+    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let (title, body) = (esc(&title), esc(&body));
     // Waiting for a button click must outlive this process: the timer's oneshot cgroup is killed
     // when `watch` exits, so the waiter runs in its own transient user unit.
     let launched = crate::finding::exe().is_ok_and(|exe| {
@@ -86,7 +89,7 @@ fn open_report() {
 /// Run `sysdoctor <args>` in a new terminal window, which waits for Enter before closing.
 pub fn open_in_terminal(args: &str) {
     let Ok(exe) = crate::finding::exe() else { return };
-    run_in_terminal(&format!("\"{}\" {args}", exe.display()));
+    run_in_terminal(&format!("{} {args}", crate::finding::sh_quote(&exe.to_string_lossy())));
 }
 
 /// Run a shell command in a new terminal window, which waits for Enter before closing.
@@ -124,6 +127,11 @@ pub fn watch(findings: &[Finding]) -> io::Result<()> {
     fs::write(&path, serde_json::to_string(&cur)?)
 }
 
+/// One ExecStart= word: double-quoted, with systemd's specifier (%) and variable ($) expansion escaped.
+fn systemd_quote(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%").replace('$', "$$"))
+}
+
 pub fn install() -> io::Result<()> {
     let exe = crate::finding::exe()?;
     if exe.components().any(|c| c.as_os_str() == "target") {
@@ -133,7 +141,7 @@ pub fn install() -> io::Result<()> {
     fs::create_dir_all(&dir)?;
     fs::write(
         dir.join("sysdoctor.service"),
-        format!("[Unit]\nDescription=sysdoctor health watch\n\n[Service]\nType=oneshot\nNice=19\nIOSchedulingClass=idle\nExecStart={} watch\n", exe.display()),
+        format!("[Unit]\nDescription=sysdoctor health watch\n\n[Service]\nType=oneshot\nNice=19\nIOSchedulingClass=idle\nExecStart={} watch\n", systemd_quote(&exe.to_string_lossy())),
     )?;
     fs::write(
         dir.join("sysdoctor.timer"),

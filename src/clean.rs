@@ -1,4 +1,4 @@
-use crate::finding::{human, parse_size, run, Finding, Fix, Severity};
+use crate::finding::{human, parse_size, run, sh_quote, Finding, Fix, Severity};
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
@@ -12,6 +12,21 @@ pub const SCANNERS: &[fn(&Path) -> Vec<Finding>] =
 
 const MIN: u64 = 50 << 20; // ignore anything smaller than 50M
 
+
+/// Permanent removal, for the GUI's "delete permanently" tick. Stops at the first failure.
+/// remove_dir_all doesn't follow symlinks: a path swapped for a link since the scan loses only the link.
+#[cfg(any(feature = "gui", test))]
+pub fn delete_all(paths: &[PathBuf]) -> Result<(), String> {
+    for p in paths {
+        let r = match fs::symlink_metadata(p) {
+            Ok(m) if m.is_dir() => fs::remove_dir_all(p),
+            Ok(_) => fs::remove_file(p),
+            Err(e) => Err(e),
+        };
+        r.map_err(|e| format!("{}: {e}", crate::finding::printable(&p.to_string_lossy())))?;
+    }
+    Ok(())
+}
 
 /// Real disk usage: st_blocks (handles sparse), hardlinks once, no symlink follow, no mount crossing.
 pub fn du(root: &Path) -> u64 {
@@ -66,8 +81,19 @@ fn is_stale(project: &Path, artifact: &str, now: SystemTime) -> bool {
         .is_some_and(|t| now.duration_since(t).unwrap_or_default() > Duration::from_secs(crate::config::get().stale_days * 86400))
 }
 
+/// Uncommitted changes. The repo's own config is untrusted (any extracted tarball can carry a .git):
+/// core.fsmonitor, hooks and filter drivers would run its commands. fsmonitor and hooks are
+/// overridden; filters can't be switched off wholesale, so a repo defining one counts as dirty
+/// and is never offered. Reading config runs nothing.
 fn git_dirty(dir: &Path) -> bool {
-    run("git", &["-C", &dir.to_string_lossy(), "status", "--porcelain"]).is_some_and(|s| !s.trim().is_empty())
+    let d = dir.to_string_lossy();
+    let keys = run("git", &["-C", &d, "config", "--local", "--includes", "--name-only", "--list"]).unwrap_or_default();
+    if keys.lines().any(|k| k.starts_with("filter.") || k == "extensions.worktreeconfig") {
+        return true;
+    }
+    let args = ["-C", &d, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "--no-optional-locks",
+        "status", "--porcelain", "--ignore-submodules=all"];
+    run("git", &args).is_some_and(|s| !s.trim().is_empty())
 }
 
 /// Find stale build artifacts under home: (artifact dir, marker file that proves it's a project).
@@ -111,14 +137,12 @@ fn projects(home: &Path) -> Vec<Finding> {
         }
         let sizes: Vec<u64> = paths.iter().map(|p| du(p)).collect();
         let detail = paths.iter().zip(&sizes).map(|(p, s)| format!("{:>8}  {}", human(*s), p.display())).collect::<Vec<_>>().join("\n");
-        out.push(Finding {
-            id: if kind == "target" { "rust-target" } else { "node-modules" },
-            severity: Severity::Ok,
-            title: format!("{label} in {} projects untouched >30d (regenerable)", paths.len()),
-            detail,
-            bytes: Some(sizes.iter().sum()),
-            fix: Some(Fix::Trash(paths)),
-        });
+        let id = if kind == "target" { "rust-target" } else { "node-modules" };
+        let mut f = Finding::ok(id, format!("{label} in {} projects untouched >30d (regenerable)", paths.len()))
+            .detail(detail)
+            .bytes(sizes.iter().sum());
+        f.fix = Some(Fix::Trash(paths));
+        out.push(f);
     }
     out
 }
@@ -178,15 +202,11 @@ fn stale_caches(home: &Path) -> Vec<Finding> {
     stale.sort_by_key(|(_, b)| std::cmp::Reverse(*b));
     let total = stale.iter().map(|(_, b)| b).sum();
     let detail = stale.iter().map(|(p, b)| format!("{:>8}  {}", human(*b), p.display())).collect::<Vec<_>>().join("\n");
-    let cmd = format!("gio trash {}", stale.iter().map(|(p, _)| format!("'{}'", p.display())).collect::<Vec<_>>().join(" "));
-    vec![Finding {
-        id: "stale-cache",
-        severity: Severity::Warn,
-        title: format!("{} ~/.cache folders unused for {days}+ days (review)", stale.len()),
-        detail,
-        bytes: Some(total),
-        fix: Some(Fix::Command(cmd)),
-    }]
+    let cmd = format!("gio trash {}", stale.iter().map(|(p, _)| sh_quote(&p.to_string_lossy())).collect::<Vec<_>>().join(" "));
+    vec![Finding::new("stale-cache", Severity::Warn, format!("{} ~/.cache folders unused for {days}+ days (review)", stale.len()))
+        .detail(detail)
+        .bytes(total)
+        .cmd(cmd)]
 }
 
 fn pkg_cache(_: &Path) -> Vec<Finding> {
@@ -265,13 +285,10 @@ fn ai_caches(home: &Path) -> Vec<Finding> {
         .filter(|p| p.exists())
         .map(|p| (du(&p), p))
         .filter(|(b, _)| *b > 100 << 20)
-        .map(|(b, p)| Finding {
-            id: "ai-cache",
-            severity: Severity::Warn,
-            title: format!("AI model cache {} (review: re-download is slow)", p.display()),
-            detail: String::new(),
-            bytes: Some(b),
-            fix: Some(Fix::Command(format!("gio trash '{}'", p.display()))),
+        .map(|(b, p)| {
+            Finding::new("ai-cache", Severity::Warn, format!("AI model cache {} (review: re-download is slow)", p.display()))
+                .bytes(b)
+                .cmd(format!("gio trash {}", sh_quote(&p.to_string_lossy())))
         })
         .collect()
 }
@@ -294,7 +311,8 @@ fn containers(_: &Path) -> Vec<Finding> {
             let s = run(bin, &["system", "df", "--format", "{{.Type}}\t{{.Reclaimable}}"])?;
             // Reclaimable looks like "1.2GB (30%)"
             let b: u64 = s.lines().filter_map(|l| parse_size(l.split('\t').nth(1)?.split_whitespace().next()?)).sum();
-            let mut f = Finding::new(bin, Severity::Ok, format!("{label} unused images/containers/cache")).cmd(format!("{bin} system prune"));
+            // --all: every unused image, not just dangling ones; matches the Reclaimable figure above
+            let mut f = Finding::new(bin, Severity::Ok, format!("{label} unused images/containers/cache")).cmd(format!("{bin} system prune --all"));
             f.bytes = Some(b);
             (b > 0).then_some(f)
         })
@@ -316,7 +334,7 @@ fn conda(home: &Path) -> Vec<Finding> {
     if b < MIN {
         return vec![];
     }
-    let mut f = Finding::new("conda", Severity::Ok, "conda unused packages and tarballs").cmd(format!("'{}' clean --all -y", exe.display()));
+    let mut f = Finding::new("conda", Severity::Ok, "conda unused packages and tarballs").cmd(format!("{} clean --all -y", sh_quote(&exe.to_string_lossy())));
     f.bytes = Some(b);
     vec![f]
 }
@@ -387,6 +405,49 @@ fn flatpak(_: &Path) -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delete_all_keeps_symlink_targets() {
+        let d = tempfile::tempdir().unwrap();
+        let (dir, outside, swapped) = (d.path().join("target"), d.path().join("keep"), d.path().join("swapped"));
+        fs::create_dir_all(dir.join("debug")).unwrap();
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("f"), "x").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("debug/link")).unwrap(); // link inside the tree
+        std::os::unix::fs::symlink(&outside, &swapped).unwrap(); // the path itself is now a link
+        delete_all(&[dir.clone(), swapped.clone()]).unwrap();
+        assert!(!dir.exists() && fs::symlink_metadata(&swapped).is_err());
+        assert!(outside.join("f").exists(), "followed a symlink");
+        assert!(delete_all(&[dir]).is_err()); // already gone: reported, not silent
+    }
+
+    /// A hostile repo (as from an extracted tarball) must not get to run its commands.
+    #[test]
+    fn git_dirty_runs_no_repo_commands() {
+        let d = tempfile::tempdir().unwrap();
+        let (repo, pwned) = (d.path().join("r"), d.path().join("PWNED"));
+        let git = |a: &[&str]| assert!(Command::new("git").arg("-C").arg(&repo).args(a).status().unwrap().success());
+        fs::create_dir(&repo).unwrap();
+        fs::write(repo.join("a.txt"), "x").unwrap();
+        git(&["init", "-q"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "add", "a.txt"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c"]);
+        let touch = format!("touch {}", pwned.display());
+        git(&["config", "core.fsmonitor", &format!("{touch}; false")]);
+        fs::write(repo.join(".git/hooks/post-index-change"), format!("#!/bin/sh\n{touch}\n")).unwrap();
+        fs::set_permissions(repo.join(".git/hooks/post-index-change"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        fs::write(repo.join("a.txt"), "y").unwrap(); // stale stat: status would re-hash and refresh the index
+        assert!(git_dirty(&repo));
+        assert!(!pwned.exists(), "fsmonitor or hook ran");
+        // fresh repo for the filter case: this test's own git calls would trip the fsmonitor above
+        fs::remove_dir_all(&repo).unwrap();
+        fs::create_dir(&repo).unwrap();
+        git(&["init", "-q"]);
+        git(&["config", "filter.x.clean", &touch]);
+        fs::write(repo.join(".gitattributes"), "* filter=x\n").unwrap();
+        assert!(git_dirty(&repo)); // filter driver: treated as dirty without running git status
+        assert!(!pwned.exists(), "filter ran");
+    }
 
     #[test]
     fn conda_dry_run() {

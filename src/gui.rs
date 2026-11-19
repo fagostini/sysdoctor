@@ -1,5 +1,5 @@
 //! `sysdoctor gui`: GTK4 window with the full report, fix buttons, ignore, cleanup and copy-report.
-use crate::finding::{human, Finding, Fix, Severity};
+use crate::finding::{human, printable, sh_quote, Finding, Fix, Severity};
 use crate::{config, report};
 use gtk::{gio, glib};
 use gtk4 as gtk;
@@ -69,14 +69,6 @@ fn sev_class(s: Severity) -> (&'static str, &'static str) {
         Severity::Warn => ("dialog-warning-symbolic", "warn"),
         Severity::Ok => ("emblem-ok-symbolic", "ok"),
     }
-}
-
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn short(s: &str) -> String {
-    if s.chars().count() > 160 { s.chars().take(160).collect::<String>() + "…" } else { s.to_string() }
 }
 
 fn build(app: &gtk::Application, checks: Checks, cleanups: Cleanups) {
@@ -207,8 +199,8 @@ impl Ui {
     }
 
     /// One finding as a framed card. `pick`: cleanup checkbox in place of the severity icon.
-    /// `ignored`: dimmed, with "Stop ignoring" instead of Run/Ignore.
-    fn card(&self, f: &Finding, pick: Option<&gtk::CheckButton>, ignored: bool) -> gtk::Frame {
+    /// `perm`: "delete permanently" tick under a trash list. `ignored`: dimmed, with "Stop ignoring" instead of Run/Ignore.
+    fn card(&self, f: &Finding, pick: Option<&gtk::CheckButton>, perm: Option<&gtk::CheckButton>, ignored: bool) -> gtk::Frame {
         let body = vbox(6, 10);
         let top = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         match pick {
@@ -249,7 +241,7 @@ impl Ui {
                 let (ui, f) = (self.clone(), f.clone());
                 b.connect_clicked(move |_| {
                     let (ui, f) = (ui.clone(), f.clone());
-                    glib::spawn_future_local(async move { ui.apply(vec![f]).await });
+                    glib::spawn_future_local(async move { ui.apply(vec![(f, false)]).await });
                 });
                 top.append(&b);
             }
@@ -291,9 +283,15 @@ impl Ui {
             l.add_css_class("cmd");
             l.set_lines(6);
             l.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            l.set_tooltip_text(Some(&short(&code)));
+            l.set_tooltip_text(Some(&code));
             body.append(&cap);
             body.append(&l);
+            if let Some(p) = perm {
+                let set = move |p: &gtk::CheckButton| cap.set_text(if p.is_active() { "Deletes permanently" } else { "Moves to trash" });
+                set(p);
+                p.connect_toggled(set);
+                body.append(p);
+            }
         }
         let frame = gtk::Frame::builder().child(&body).build();
         if ignored {
@@ -315,7 +313,7 @@ impl Ui {
             self.health.append(&l);
         }
         for p in &problems {
-            self.health.append(&self.card(p, None, false));
+            self.health.append(&self.card(p, None, None, false));
         }
         let passing = vbox(2, 6);
         for o in &ok {
@@ -326,7 +324,7 @@ impl Ui {
         if !ignored.is_empty() {
             let list = vbox(8, 6);
             for i in &ignored {
-                list.append(&self.card(i, None, true));
+                list.append(&self.card(i, None, None, true));
             }
             let title = format!("Ignored ({})", ignored.len());
             self.health.append(&gtk::Expander::builder().label(title).child(&list).expanded(true).build());
@@ -352,60 +350,87 @@ impl Ui {
         for f in items {
             // regenerable (Ok) pre-ticked; "review" (Warn) items are opt-in
             let key = format!("{} {}", f.id, f.title);
+            // trash items can skip the trash; never pre-ticked
+            let perm = matches!(f.fix, Some(Fix::Trash(_))).then(|| {
+                let key = format!("delete {key}");
+                let on = self.picked.borrow().get(&key).copied().unwrap_or(false);
+                let p = gtk::CheckButton::builder().label("Delete permanently instead (can't be undone)").active(on).build();
+                let picked = self.picked.clone();
+                p.connect_toggled(move |p| {
+                    picked.borrow_mut().insert(key.clone(), p.is_active());
+                });
+                p
+            });
             let on = self.picked.borrow().get(&key).copied().unwrap_or(f.severity == Severity::Ok);
             let c = gtk::CheckButton::builder().active(on).valign(gtk::Align::Center).build();
             let picked = self.picked.clone();
             c.connect_toggled(move |c| {
                 picked.borrow_mut().insert(key.clone(), c.is_active());
             });
-            self.clean.append(&self.card(&f, Some(&c), false));
-            picks.push((c, f));
+            self.clean.append(&self.card(&f, Some(&c), perm.as_ref(), false));
+            picks.push((c, perm, f));
         }
         let picks = Rc::new(picks);
         let update = {
             let (picks, total, go) = (picks.clone(), total.clone(), go.clone());
             move || {
-                let sel: u64 = picks.iter().filter(|(c, _)| c.is_active()).filter_map(|(_, f)| f.bytes).sum();
+                let sel: u64 = picks.iter().filter(|(c, _, _)| c.is_active()).filter_map(|(_, _, f)| f.bytes).sum();
                 total.set_markup(&format!("Selected: <b>{}</b> of {} reclaimable. Unticked items need review first.", human(sel), human(all)));
-                go.set_sensitive(picks.iter().any(|(c, _)| c.is_active()));
+                go.set_sensitive(picks.iter().any(|(c, _, _)| c.is_active()));
             }
         };
         update();
-        for (c, _) in picks.iter() {
+        for (c, _, _) in picks.iter() {
             let update = update.clone();
             c.connect_toggled(move |_| update());
         }
         let ui = self.clone();
         go.connect_clicked(move |_| {
-            let sel: Vec<Finding> = picks.iter().filter(|(c, _)| c.is_active()).map(|(_, f)| f.clone()).collect();
+            let sel: Vec<(Finding, bool)> = picks
+                .iter()
+                .filter(|(c, _, _)| c.is_active())
+                .map(|(_, p, f)| (f.clone(), p.as_ref().is_some_and(|p| p.is_active())))
+                .collect();
             let ui = ui.clone();
             glib::spawn_future_local(async move { ui.apply(sel).await });
         });
     }
 
-    /// Confirm, trash paths in-process, run commands in one terminal window (sudo prompts there), then re-check.
-    async fn apply(&self, items: Vec<Finding>) {
+    /// Confirm, trash or delete paths in-process, run commands in one terminal window (sudo prompts there), then re-check.
+    /// `items`: (finding, delete its trash paths permanently instead).
+    async fn apply(&self, items: Vec<(Finding, bool)>) {
         if self.running.get() {
             self.status.set_text("A command is still running in the terminal");
             return;
         }
-        let paths: Vec<PathBuf> = items.iter().filter_map(|f| if let Some(Fix::Trash(p)) = &f.fix { Some(p.clone()) } else { None }).flatten().collect();
-        let cmds: Vec<&str> = items.iter().filter_map(|f| if let Some(Fix::Command(c)) = &f.fix { Some(c.as_str()) } else { None }).collect();
-        if paths.is_empty() && cmds.is_empty() {
+        let (mut to_trash, mut to_delete): (Vec<PathBuf>, Vec<PathBuf>) = (vec![], vec![]);
+        for (f, perm) in &items {
+            if let Some(Fix::Trash(p)) = &f.fix {
+                if *perm { &mut to_delete } else { &mut to_trash }.extend(p.iter().cloned());
+            }
+        }
+        let cmds: Vec<&str> = items.iter().filter_map(|(f, _)| if let Some(Fix::Command(c)) = &f.fix { Some(c.as_str()) } else { None }).collect();
+        if to_trash.is_empty() && to_delete.is_empty() && cmds.is_empty() {
             self.status.set_text("Nothing selected");
             return;
         }
         let mut detail = String::new();
-        if !paths.is_empty() {
+        if !to_trash.is_empty() {
             detail += "Move to trash:\n";
-            paths.iter().take(8).for_each(|p| detail += &format!("  {}\n", p.display()));
-            if paths.len() > 8 {
-                detail += &format!("  …and {} more\n", paths.len() - 8);
+            to_trash.iter().take(8).for_each(|p| detail += &format!("  {}\n", p.display()));
+            if to_trash.len() > 8 {
+                detail += &format!("  …and {} more\n", to_trash.len() - 8);
             }
+        }
+        if !to_delete.is_empty() {
+            // in full, like commands: nothing to restore afterwards
+            detail += "\nDelete permanently (can't be undone):\n";
+            to_delete.iter().for_each(|p| detail += &format!("  {}\n", p.display()));
         }
         if !cmds.is_empty() {
             detail += "\nRun:\n";
-            cmds.iter().for_each(|c| detail += &format!("  {}\n", short(c)));
+            // in full: what is confirmed must be exactly what runs
+            cmds.iter().for_each(|c| detail += &format!("  {}\n", printable(c)));
         }
         let ask = gtk::AlertDialog::builder()
             .modal(true)
@@ -419,20 +444,32 @@ impl Ui {
             return;
         }
         self.busy("Applying…");
-        if !paths.is_empty() {
-            let n = paths.len();
-            match gio::spawn_blocking(move || trash::delete_all(&paths).map_err(|e| e.to_string())).await {
-                Ok(Ok(())) => self.status.set_text(&format!("Trashed {n} paths. Empty the trash to free the space.")),
-                Ok(Err(e)) => self.status.set_text(&format!("trash failed: {e}")),
+        let mut done = vec![];
+        if !to_trash.is_empty() {
+            let n = to_trash.len();
+            match gio::spawn_blocking(move || trash::delete_all(&to_trash).map_err(|e| e.to_string())).await {
+                Ok(Ok(())) => done.push(format!("Trashed {n} paths. Empty the trash to free the space.")),
+                Ok(Err(e)) => done.push(format!("trash failed: {e}")),
                 Err(_) => {}
             }
+        }
+        if !to_delete.is_empty() {
+            let n = to_delete.len();
+            match gio::spawn_blocking(move || crate::clean::delete_all(&to_delete)).await {
+                Ok(Ok(())) => done.push(format!("Deleted {n} paths.")),
+                Ok(Err(e)) => done.push(format!("delete failed: {e}")),
+                Err(_) => {}
+            }
+        }
+        if !done.is_empty() {
+            self.status.set_text(&done.join(" "));
         }
         if cmds.is_empty() {
             self.reload();
             return;
         }
         // echo each command, stop at the first failure; child-exited re-checks
-        let script = cmds.iter().map(|c| format!("printf '\\033[1;36m$ %s\\033[0m\\n' {} && {c}", sh_quote(&short(c)))).collect::<Vec<_>>().join(" && ");
+        let script = cmds.iter().map(|c| format!("printf '\\033[1;36m$ %s\\033[0m\\n' {} && {c}", sh_quote(&printable(c)))).collect::<Vec<_>>().join(" && ");
         self.term_pane.set_visible(true);
         self.running.set(true);
         self.status.set_text("Running in terminal below…");

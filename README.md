@@ -41,7 +41,7 @@ It can also watch in the background and notify you only when something *new* goe
 - **Every system change is confirmed.** The window shows a dialog listing each command and each folder before anything happens. On the command line you answer `y` for each command separately.
 - **You see the exact commands.** Every problem and cleanup item shows its fix in full: the command under **Runs**, or the folders under **Moves to trash**. When it runs, each command is printed in the terminal before it starts, and the sequence stops at the first failure.
 - **Root only through `sudo`.** Commands that need root say so (`sudo …`) and go through your system's normal password prompt. sysdoctor never stores a password, is never setuid, and runs no root process of its own.
-- **Careful with deletion.** Folders sysdoctor removes itself go to the trash, so you can restore them. Cleanup *commands* (emptying the trash, `apt clean`, `docker system prune`, journal vacuum, removing old kernels) delete for good, which is why they are spelled out and confirmed first. Only regenerable items are pre-selected; anything that needs a judgement call starts unticked. Projects used in the last 30 days (configurable), projects with uncommitted git changes, the running kernel and the two newest kernels are never offered.
+- **Careful with deletion.** Folders sysdoctor removes itself go to the trash, so you can restore them, unless you tick **Delete permanently instead** on that item in the window (always unticked to start). Cleanup *commands* (emptying the trash, `apt clean`, `docker system prune`, journal vacuum, removing old kernels) delete for good, which is why they are spelled out and confirmed first. Only regenerable items are pre-selected; anything that needs a judgement call starts unticked. Projects used in the last 30 days (configurable), projects with uncommitted git changes, the running kernel and the two newest kernels are never offered.
 - **Background parts are opt-in.** The timer and the tray icon exist only after you run `watch --install` or `tray --install`, and both can be removed.
 
 ### Your data stays yours
@@ -171,7 +171,7 @@ The whole report in one window (build with `--features gui`):
 
 - **Health** tab: one card per problem with its fix command, a **Run…** button and an **Ignore** button. Passing checks are folded away. Ignored problems stay listed, dimmed, with **Stop ignoring**.
 - **Cleanup** tab: every reclaimable item with its size and exact command or folders. Regenerable items start ticked, items that need a decision start unticked. The header shows *Selected: X of Y reclaimable* as you tick.
-- **Run** and **Clean selected** first show a confirmation dialog listing everything that will happen. Folders go to the trash. Commands run in a terminal panel at the bottom of the window, where `sudo` can ask for your password, then the report refreshes.
+- **Run** and **Clean selected** first show a confirmation dialog listing everything that will happen. Folders go to the trash; an item's **Delete permanently instead** tick (unticked by default) skips the trash, and the dialog then lists each of its folders under *Delete permanently*. Commands run in a terminal panel at the bottom of the window, where `sudo` can ask for your password, then the report refreshes.
 - **Check again** re-runs everything. **Copy** puts the scrubbed `report` on the clipboard.
 
 Only one window opens: launching it again brings the existing one to the front.

@@ -91,7 +91,7 @@ pub fn permissions() -> Vec<Finding> {
             let name = format!("~/.ssh/{}", e.file_name().to_string_lossy());
             out.push(Finding::new("permissions", Severity::Crit, format!("Private key {name} readable by others (mode {m:o})"))
                 .detail("Other local users can copy it. ssh may also refuse to use it.")
-                .cmd(format!("chmod 600 {name}")));
+                .cmd(format!("chmod 600 ~/.ssh/{}", crate::finding::sh_quote(&e.file_name().to_string_lossy()))));
         }
     }
     if out.is_empty() {
