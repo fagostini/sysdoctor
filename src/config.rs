@@ -66,7 +66,8 @@ pub fn get() -> &'static Config {
     })
 }
 
-// ---- ignore list: one case-insensitive substring per line, matched against "id title" ----
+// ---- ignore list, one pattern per line: "id:<id>" matches that id exactly, anything else is a
+// case-insensitive substring of "id title" ----
 
 fn ignore_path() -> Option<PathBuf> {
     dir().map(|d| d.join("ignore"))
@@ -85,7 +86,10 @@ pub fn ignores() -> Vec<String> {
 
 fn is_ignored(f: &Finding, patterns: &[String]) -> bool {
     let hay = format!("{} {}", f.id, f.title).to_lowercase();
-    patterns.iter().any(|p| hay.contains(p.as_str()))
+    patterns.iter().any(|p| match p.strip_prefix("id:") {
+        Some(id) => f.id == id.trim(),
+        None => hay.contains(p.as_str()),
+    })
 }
 
 /// (kept, ignored).
@@ -143,6 +147,11 @@ mod tests {
         assert!(is_ignored(&f, &["failed-unit".into()]));
         assert!(!is_ignored(&f, &["battery".into()]));
         assert!(is_ignored(&f, std::slice::from_ref(&"casper".to_string())));
+        // "id:" is exact: muting the ssh-password warning must not hide a private-key finding
+        let key = Finding::new("permissions", Severity::Crit, "Private key ~/.ssh/id_rsa readable by others");
+        assert!(!is_ignored(&key, &["id:ssh".into()]));
+        assert!(is_ignored(&Finding::new("ssh", Severity::Warn, "SSH accepts password logins"), &["id:ssh".into()]));
+        assert!(!is_ignored(&Finding::new("old-kernels", Severity::Ok, "3 old kernels"), &["id:kernel".into()]));
     }
 
     #[test]

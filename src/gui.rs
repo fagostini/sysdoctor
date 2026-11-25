@@ -247,9 +247,10 @@ impl Ui {
             }
             let b = gtk::Button::with_label("Ignore");
             b.set_valign(gtk::Align::Center);
-            b.set_tooltip_text(Some(&format!("Mute all \"{}\" findings (undo: sysdoctor ignore --remove {})", f.id, f.id)));
-            let (ui, id) = (self.clone(), f.id);
-            b.connect_clicked(move |_| match config::add_ignore(id) {
+            let pattern = format!("id:{}", f.id);
+            b.set_tooltip_text(Some(&format!("Mute all \"{}\" findings (undo: sysdoctor ignore --remove {pattern})", f.id)));
+            let ui = self.clone();
+            b.connect_clicked(move |_| match config::add_ignore(&pattern) {
                 Ok(()) => ui.reload(),
                 Err(e) => ui.status.set_text(&format!("ignore failed: {e}")),
             });

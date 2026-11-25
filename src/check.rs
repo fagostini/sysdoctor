@@ -147,9 +147,9 @@ fn smart() -> Vec<Finding> {
     if run("smartctl", &["--version"]).is_none() {
         return vec![Finding::skipped("smart", "smartctl not installed").cmd(crate::pkg::install("smartmontools"))];
     }
-    let disks = block_disks();
     let mut out = vec![];
-    for d in disks {
+    let (mut checked, mut unreadable) = (0, 0);
+    for d in block_disks() {
         let dev = format!("/dev/{d}");
         let Some(j) = run_any("smartctl", &["-j", "-H", &dev]) else { continue };
         let v: serde_json::Value = serde_json::from_str(&j).unwrap_or_default();
@@ -159,11 +159,15 @@ fn smart() -> Vec<Finding> {
                     .detail("Disk predicts its own failure. Back up now.")
                     .cmd(format!("sudo smartctl -a {}", sh_quote(&dev))),
             ),
-            Some(true) => {}
-            None => {
-                return vec![Finding::skipped("smart", "needs root").cmd(crate::finding::sudo_self("check"))];
-            }
+            Some(true) => checked += 1,
+            // no permission, or no SMART at all (eMMC, USB bridges, VM disks): skip this disk, keep the others
+            None => unreadable += 1,
         }
+    }
+    if unreadable > 0 && !crate::finding::is_root() {
+        out.push(Finding::skipped("smart", format!("{unreadable} disk(s) need root to read SMART")).cmd(crate::finding::sudo_self("check")));
+    } else if out.is_empty() && checked == 0 {
+        out.push(Finding::skipped("smart", "no disk reports SMART health"));
     }
     if out.is_empty() {
         out.push(Finding::ok("smart", "SMART health OK"));
@@ -313,7 +317,25 @@ fn ssh_password() -> Vec<Finding> {
     }
     vec![Finding::new("ssh", Severity::Warn, "SSH accepts password logins")
         .detail("Brute-force target. Use keys, then disable passwords.")
-        .cmd("echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/00-nopass.conf && sudo systemctl reload ssh")]
+        .cmd(ssh_fix(&fs::read_to_string(cfg).unwrap_or_default(), ["sshd", "ssh"].into_iter().find(|u| active(u)).unwrap_or("ssh")))]
+}
+
+/// Disable password logins. sshd takes the first value it reads, so the setting must come first:
+/// a 00- drop-in when sshd_config includes sshd_config.d, else a new first line in sshd_config.
+/// `sshd -t` validates before the reload, so a broken config never locks anyone out.
+/// Unit: "sshd" on Fedora/Arch/openSUSE (and a Debian alias), "ssh" on Debian/Ubuntu;
+/// try-reload-or-restart is a no-op when only ssh.socket is active.
+fn ssh_fix(sshd_config: &str, unit: &str) -> String {
+    let drop_in = sshd_config.lines().any(|l| {
+        let l = l.trim().to_ascii_lowercase();
+        l.starts_with("include") && l.contains("sshd_config.d")
+    });
+    let write = if drop_in {
+        "echo 'PasswordAuthentication no' | sudo tee /etc/ssh/sshd_config.d/00-nopass.conf"
+    } else {
+        "sudo sed -i '1i PasswordAuthentication no' /etc/ssh/sshd_config"
+    };
+    format!("{write} && sudo sshd -t && sudo systemctl try-reload-or-restart {unit}")
 }
 
 fn battery_ratio(full: &str, design: &str) -> Option<f64> {
@@ -380,6 +402,14 @@ mod tests {
         let f = run_plugin(&mk("slow", "sleep 5"), Duration::from_millis(300));
         assert_eq!(f.severity, Severity::Warn);
         assert!(f.title.contains("timed out"));
+    }
+
+    #[test]
+    fn ssh_fix_targets() {
+        let fix = ssh_fix("Include /etc/ssh/sshd_config.d/*.conf\n", "sshd");
+        assert!(fix.contains("sshd_config.d/00-nopass.conf") && fix.ends_with("try-reload-or-restart sshd"));
+        let fix = ssh_fix("# Include /etc/ssh/sshd_config.d/*.conf\nPort 22\n", "ssh");
+        assert!(fix.contains("sed -i '1i PasswordAuthentication no' /etc/ssh/sshd_config") && fix.ends_with(" ssh"));
     }
 
     #[test]

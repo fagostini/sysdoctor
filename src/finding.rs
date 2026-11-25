@@ -75,6 +75,11 @@ pub fn exe() -> std::io::Result<PathBuf> {
     Ok(p.to_str().and_then(|s| s.strip_suffix(" (deleted)")).map(PathBuf::from).unwrap_or(p))
 }
 
+/// Effective uid 0 (the owner of /proc/self).
+pub fn is_root() -> bool {
+    std::fs::metadata("/proc/self").is_ok_and(|m| std::os::unix::fs::MetadataExt::uid(&m) == 0)
+}
+
 /// `sudo <full path to this binary> <args>`: sudo's secure_path usually lacks ~/.cargo/bin.
 pub fn sudo_self(args: &str) -> String {
     let exe = exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "sysdoctor".into());
