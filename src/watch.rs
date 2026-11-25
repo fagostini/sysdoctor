@@ -283,6 +283,43 @@ pub fn snapshot(home: &Path) -> io::Result<Vec<Snap>> {
     Ok(snaps)
 }
 
+/// Days until `free` bytes are used up at the rate seen between two samples. None if not growing.
+fn days_until_full(used0: u64, t0: u64, used1: u64, t1: u64, free: u64) -> Option<f64> {
+    let days = t1.checked_sub(t0)? as f64 / 86400.0;
+    let rate = (used1 as f64 - used0 as f64) / days;
+    (days > 0.0 && rate > 0.0).then(|| free as f64 / rate)
+}
+
+/// "/ full in ~N days" from the daily growth history (read only: the timer does the measuring).
+// ponytail: two-point rate over >=7 days; least-squares fit if one-off bursts cause false alarms.
+pub fn disk_forecast() -> Vec<Finding> {
+    let cfg = crate::config::get();
+    if !cfg.disk_forecast {
+        return vec![];
+    }
+    let Ok(dir) = state_dir() else { return vec![] };
+    let snaps = load(&dir.join("growth.jsonl"));
+    let Some(cur) = snaps.last() else { return vec![] };
+    let Some(base) = snaps.iter().rev().find(|s| s.ts + 7 * 86400 <= cur.ts) else { return vec![] };
+    let mut out = vec![];
+    for (k, &used1) in &cur.sizes {
+        let Some(mp) = k.strip_prefix("mount ") else { continue };
+        let Some(&used0) = base.sizes.get(k) else { continue };
+        let Ok(st) = nix::sys::statvfs::statvfs(mp) else { continue };
+        let free = st.blocks_available() * st.fragment_size();
+        let Some(days) = days_until_full(used0, base.ts, used1, cur.ts, free) else { continue };
+        if days <= cfg.disk_forecast_days as f64 {
+            let per_day = (used1 - used0) as f64 / ((cur.ts - base.ts) as f64 / 86400.0);
+            out.push(
+                Finding::new("disk-forecast", Severity::Warn, format!("{mp} full in ~{:.0} days", days.max(1.0)))
+                    .detail(format!("growing {}/day, {} free", human(per_day as u64), human(free)))
+                    .cmd("sysdoctor clean"),
+            );
+        }
+    }
+    out
+}
+
 /// Size change per key, biggest growth first. Keys missing on one side count as 0.
 fn deltas(old: &BTreeMap<String, u64>, new: &BTreeMap<String, u64>) -> Vec<(String, i64)> {
     let keys: HashSet<&String> = old.keys().chain(new.keys()).collect();
@@ -323,6 +360,16 @@ pub fn growth(home: &Path, days: u64) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forecast_math() {
+        let d = 86400;
+        // 1G/day growth, 10G free -> 10 days
+        assert_eq!(days_until_full(0, 0, 10 << 30, 10 * d, 10 << 30), Some(10.0));
+        assert_eq!(days_until_full(5, 0, 5, 10 * d, 100), None); // flat
+        assert_eq!(days_until_full(9, 0, 5, 10 * d, 100), None); // shrinking
+        assert_eq!(days_until_full(0, d, 5, d, 100), None); // same timestamp
+    }
 
     #[test]
     fn new_problem_detection() {

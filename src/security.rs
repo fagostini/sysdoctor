@@ -34,6 +34,16 @@ pub fn updates() -> Vec<Finding> {
 }
 
 /// Version-aware ordering for kernel strings like "6.8.0-149-generic".
+pub fn broken_packages() -> Vec<Finding> {
+    let Some(text) = crate::pkg::broken() else { return vec![] };
+    let detail: Vec<&str> = text.lines().take(10).collect();
+    let f = Finding::new("broken-packages", Severity::Warn, "Package database reports broken packages").detail(detail.join("\n"));
+    vec![match crate::pkg::detect() {
+        Some(crate::pkg::Pm::Apt) => f.cmd("sudo dpkg --configure -a && sudo apt -f install"),
+        _ => f,
+    }]
+}
+
 fn vercmp(a: &str, b: &str) -> Ordering {
     fn parts(s: &str) -> Vec<u64> {
         s.split(|c: char| !c.is_ascii_digit()).filter(|p| !p.is_empty()).filter_map(|p| p.parse().ok()).collect()

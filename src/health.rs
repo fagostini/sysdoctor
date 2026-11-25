@@ -305,6 +305,33 @@ pub fn firmware() -> Vec<Finding> {
         .cmd(crate::pkg::install("linux-firmware"))]
 }
 
+/// (exe, crashes) for programs that crashed more than once, most crashes first.
+fn crash_counts(json: &str) -> Vec<(String, usize)> {
+    let v: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
+    let mut n: HashMap<String, usize> = HashMap::new();
+    for e in &v {
+        if let Some(exe) = e["exe"].as_str() {
+            *n.entry(exe.to_string()).or_default() += 1;
+        }
+    }
+    let mut out: Vec<(String, usize)> = n.into_iter().filter(|(_, c)| *c >= 2).collect();
+    out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    out
+}
+
+pub fn coredumps() -> Vec<Finding> {
+    // exits 1 with no output when there are no crashes
+    let Some(j) = run_any("coredumpctl", &["list", "--since=-7d", "--json=short", "--no-pager"]) else { return vec![] };
+    let c = crash_counts(&j);
+    if c.is_empty() {
+        return vec![];
+    }
+    let detail: Vec<String> = c.iter().map(|(exe, n)| format!("{exe} ×{n}")).collect();
+    vec![Finding::new("coredumps", Severity::Warn, format!("{} program(s) crashed repeatedly this week", c.len()))
+        .detail(detail.join("\n"))
+        .cmd("coredumpctl list --since=-7d")]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +353,13 @@ mod tests {
     fn normalize_groups_variants() {
         assert_eq!(normalize("usb 1-2: device descriptor read/64, error -71"), "usb # device descriptor # error #");
         assert_eq!(normalize("usb 3-4: device descriptor read/64, error -110"), normalize("usb 1-2: device descriptor read/64, error -71"));
+    }
+
+    #[test]
+    fn crash_grouping() {
+        let j = r#"[{"exe":"/usr/bin/a","sig":11},{"exe":"/usr/bin/b"},{"exe":"/usr/bin/a"},{"pid":1}]"#;
+        assert_eq!(crash_counts(j), vec![("/usr/bin/a".to_string(), 2)]);
+        assert!(crash_counts("").is_empty());
     }
 
     #[test]

@@ -27,6 +27,10 @@ pub struct Config {
     pub expiry_warn_days: u64,
     /// Extra PEM certificates to watch for expiry
     pub cert_paths: Vec<PathBuf>,
+    /// Predict when filesystems fill up from the daily growth history
+    pub disk_forecast: bool,
+    /// Warn when a filesystem is predicted full within this many days
+    pub disk_forecast_days: u64,
 }
 
 impl Default for Config {
@@ -42,6 +46,8 @@ impl Default for Config {
             backup_max_days: 7,
             expiry_warn_days: 30,
             cert_paths: vec![],
+            disk_forecast: true,
+            disk_forecast_days: 30,
         }
     }
 }

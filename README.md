@@ -25,8 +25,8 @@ It can also watch in the background and notify you only when something *new* goe
 
 ## Features
 
-- **Health check:** about 20 checks covering disks, SMART, failed services, updates, pending reboot, memory, firewall, SSH, file permissions, leaked tokens in shell history, expiring keys and certificates, backups, battery, CPU throttling, firmware, system log errors and clock sync. Each problem says what is wrong and how to fix it.
-- **Cleanup advisor:** finds reclaimable space (stale build output, package and developer caches, AI models, old kernels, journal, containers, conda, snap, flatpak) and sizes it before you decide anything.
+- **Health check:** about 20 checks covering disks, SMART, failed services, updates, pending reboot, memory, broken packages, filesystem errors, crashes, disk-full forecast, firewall, SSH, file permissions, leaked tokens in shell history, expiring keys and certificates, backups, battery, CPU throttling, firmware, system log errors and clock sync. Each problem says what is wrong and how to fix it.
+- **Cleanup advisor:** finds reclaimable space (stale build output, package and developer caches, AI models, old kernels, journal, crash dumps, containers, conda, snap, flatpak) and sizes it before you decide anything.
 - **Report window** (`sysdoctor gui`): the full report with a Run button per problem, a tick list for cleanup with a live total of what you selected, ignored issues kept visible with **Stop ignoring**, and an embedded terminal that shows commands running.
 - **Tray icon:** a heart that turns yellow or red, counts problems, and pulses when something new appears.
 - **Background watch:** an hourly timer that notifies you only about *new* problems, with snooze.
@@ -111,15 +111,15 @@ sysdoctor completions zsh > ~/.zfunc/_sysdoctor     # or bash, fish, elvish, pow
 
 | Area | Checks |
 |---|---|
-| Storage | Disk space (warns at 90%, critical at 97%), inode exhaustion, SMART health (needs root) |
+| Storage | Disk space (warns at 90%, critical at 97%), inode exhaustion, SMART health (needs root), filesystem errors (ext4, btrfs, ZFS), disk-full forecast ("/ full in ~N days", from the `watch` timer's daily history) |
 | Services | Failed systemd units, system and user |
-| Updates | Pending security updates (apt, dnf, zypper; pacman shows a count only), reboot required, running kernel older than installed |
+| Updates | Pending security updates (apt, dnf, zypper; pacman shows a count only), reboot required, running kernel older than installed, broken packages (`dpkg --audit`, `pacman -Dk`, `dnf check`) |
 | Memory | OOM kills this boot, sustained memory pressure (PSI) |
 | Security | Firewall active, SSH password login, permissions on `~/.ssh`, `~/.gnupg` and private keys, known API token formats in shell history |
 | Expiry | Your GPG keys, SSH certificates, Let's Encrypt and configured certificates expiring within 30 days |
 | Backups | Last Timeshift, Kopia, restic, borg/borgmatic, snapper or Déjà Dup backup older than 7 days, or no backups at all |
 | Hardware | Battery health, CPU thermal throttling, missing firmware |
-| Logs | Error messages this boot, grouped by pattern, highlighting the ones that are new since last boot |
+| Logs | Error messages this boot, grouped by pattern, highlighting the ones that are new since last boot; programs that crashed (core dumped) twice or more this week |
 | Time | NTP sync |
 | Plugins | Your own checks, see [Custom checks](#custom-checks) |
 
@@ -211,6 +211,7 @@ Lists reclaimable space, largest first. By default it is a **dry run** and chang
 | Trash | Over 10 MB | `gio trash --empty` offered |
 | Package cache | Downloaded packages (apt, dnf, pacman, zypper) | The distro's clean command offered (`apt clean`, `dnf clean packages`, `paccache -rk2`, `zypper clean`) |
 | Old kernels | All but the newest two and the running one (apt, dnf, zypper; Arch keeps one) | `apt purge <packages>`, `dnf remove --oldinstallonly` or `zypper purge-kernels` offered |
+| Crash dumps | `/var/lib/systemd/coredump` over 100 MB | `sudo find /var/lib/systemd/coredump -type f -delete` offered |
 | Docker, Podman, conda, journal, snap, flatpak | Reclaimable images, journal over 500 MB, disabled snap revisions, unused runtimes | Their cleanup commands offered |
 
 `--apply` first shows every folder it will move to the trash and asks once. It then offers each cleanup command individually. Trashed files still use disk space until you empty the trash.
@@ -325,6 +326,8 @@ journal_max_mb = 1000   # journal size before it counts as reclaimable (default 
 backup_max_days = 3     # warn when the newest backup is older (default 7)
 expiry_warn_days = 30   # keys/certificates expiring within (default 30)
 cert_paths = ["/etc/ssl/private/mysite.pem"]   # extra certificates to watch
+disk_forecast = false   # predict when disks fill up (default true; needs `watch --install` history)
+disk_forecast_days = 14 # warn when predicted full within (default 30)
 ```
 
 A misspelled key is reported, and the defaults are used, rather than silently ignored.
