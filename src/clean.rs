@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 pub const SCANNERS: &[fn(&Path) -> Vec<Finding>] =
-    &[projects, pkg_caches, ai_caches, stale_caches, user_trash, pkg_cache, old_kernels, containers, conda, journal, snap, flatpak];
+    &[projects, pkg_caches, ai_caches, stale_caches, user_trash, pkg_cache, old_kernels, containers, conda, journal, coredumps, snap, flatpak];
 
 const MIN: u64 = 50 << 20; // ignore anything smaller than 50M
 
@@ -349,6 +349,17 @@ fn journal(_: &Path) -> Vec<Finding> {
     let mb = crate::config::get().journal_max_mb;
     let mut f = Finding::new("journal", Severity::Ok, format!("systemd journal over {mb}M")).cmd(format!("sudo journalctl --vacuum-size={mb}M"));
     f.bytes = Some(b - keep);
+    vec![f]
+}
+
+fn coredumps(_: &Path) -> Vec<Finding> {
+    let b = du(Path::new("/var/lib/systemd/coredump"));
+    if b < 100 << 20 {
+        return vec![];
+    }
+    let mut f = Finding::new("coredumps", Severity::Ok, "Crash dumps in /var/lib/systemd/coredump")
+        .cmd("sudo find /var/lib/systemd/coredump -type f -delete");
+    f.bytes = Some(b);
     vec![f]
 }
 

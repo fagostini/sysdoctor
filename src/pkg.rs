@@ -34,6 +34,21 @@ pub fn install(pkg: &str) -> String {
     }
 }
 
+/// Problems the package database reports (half-installed, missing deps), as text. None: healthy or unknown.
+pub fn broken() -> Option<String> {
+    let (cmd, args): (&str, &[&str]) = match detect()? {
+        Pm::Apt => ("dpkg", &["--audit"]),
+        Pm::Pacman => ("pacman", &["-Dk"]),
+        Pm::Dnf => ("dnf", &["-q", "-C", "check"]),
+        Pm::Zypper => return None, // `zypper verify` needs root
+    };
+    let out = Command::new(cmd).args(args).output().ok()?;
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    // dpkg --audit exits 0 even when it lists problems; pacman/dnf exit non-zero
+    let bad = if cmd == "dpkg" { !out.stdout.is_empty() } else { !out.status.success() };
+    (bad && !text.trim().is_empty()).then(|| text.trim().to_string())
+}
+
 /// Lines of `dnf check-update` that name a package ("name.arch  version  repo").
 fn count_dnf(list: &str) -> usize {
     list.lines()

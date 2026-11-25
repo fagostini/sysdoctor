@@ -11,7 +11,8 @@ pub const CHECKS: &[fn() -> Vec<Finding>] = &[
     disks, smart, failed_units, reboot_required, crate::security::kernel, crate::security::updates, oom,
     crate::health::memory_pressure, ntp, firewall, ssh_password, crate::security::permissions,
     crate::security::history_secrets, crate::security::expiries, crate::health::backup, battery,
-    crate::health::throttling, crate::health::firmware, crate::health::journal_digest, plugins,
+    crate::health::throttling, crate::health::firmware, crate::health::journal_digest, crate::health::coredumps, crate::security::broken_packages,
+    fs_errors, crate::watch::disk_forecast, plugins,
 ];
 
 /// User checks in $XDG_CONFIG_HOME/sysdoctor/checks.d, Nagios-style:
@@ -285,6 +286,43 @@ fn sshd_password_auth(path: &Path) -> bool {
 }
 
 /// Minimal glob: supports a single '*' in the file name. Relative paths resolve against /etc/ssh.
+/// Sum of a btrfs devinfo error_stats file ("write_errs 0\nread_errs 2\n...").
+fn btrfs_errs(text: &str) -> u64 {
+    text.lines().filter_map(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok()).sum()
+}
+
+/// Errors the kernel recorded on ext4/btrfs (sysfs, no root needed) and unhealthy ZFS pools.
+fn fs_errors() -> Vec<Finding> {
+    let mut out = vec![];
+    let num = |p: &Path| fs::read_to_string(p).ok()?.trim().parse::<u64>().ok();
+    let name = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    for d in glob("/sys/fs/ext4/*") {
+        let dev = name(&d);
+        if let Some(n) = num(&d.join("errors_count")).filter(|n| *n > 0) {
+            out.push(
+                Finding::new("fs-errors", Severity::Crit, format!("ext4 {dev} has {n} filesystem error(s)"))
+                    .detail("Back up, then check the filesystem while it is unmounted (e.g. from a live USB)")
+                    .cmd(format!("sudo fsck -f /dev/{dev}")),
+            );
+        }
+    }
+    for d in glob("/sys/fs/btrfs/*") {
+        let devs = glob(&format!("{}/devinfo/*", d.display()));
+        let n: u64 = devs.iter().filter_map(|v| fs::read_to_string(v.join("error_stats")).ok()).map(|t| btrfs_errs(&t)).sum();
+        if n > 0 {
+            out.push(Finding::new("fs-errors", Severity::Crit, format!("btrfs {} has {n} device error(s)", name(&d))).cmd("sudo btrfs device stats /"));
+        }
+    }
+    if let Some(s) = run("zpool", &["status", "-x"])
+        && !s.trim().is_empty()
+        && !s.contains("all pools are healthy")
+        && !s.contains("no pools available")
+    {
+        out.push(Finding::new("fs-errors", Severity::Crit, "ZFS pool unhealthy").detail(s.trim()).cmd("zpool status -v"));
+    }
+    out
+}
+
 fn glob(pat: &str) -> Vec<PathBuf> {
     let p = if Path::new(pat).is_absolute() { PathBuf::from(pat) } else { Path::new("/etc/ssh").join(pat) };
     let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
@@ -383,6 +421,12 @@ fn battery() -> Vec<Finding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn btrfs_error_sum() {
+        assert_eq!(btrfs_errs("write_errs 0\nread_errs 2\nflush_errs 0\ncorruption_errs 3\ngeneration_errs 0\n"), 5);
+        assert_eq!(btrfs_errs(""), 0);
+    }
 
     #[test]
     fn plugin_protocol() {
