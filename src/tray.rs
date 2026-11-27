@@ -237,7 +237,8 @@ pub fn run(checks: fn() -> (Vec<Finding>, Vec<Finding>)) -> io::Result<()> {
     let tray = SysTray { problems: vec![], ignored: 0, checked: None, busy: true, attention: false, blink: false, mono: false, dot: false, refresh: tx };
     let style = style_path().and_then(|p| fs::read_to_string(p).ok()).unwrap_or_default();
     let tray = SysTray { mono: style.contains("mono"), dot: style.contains("dot"), ..tray };
-    let handle = tray.spawn().map_err(|e| io::Error::other(format!("no system tray available: {e}")))?;
+    // Login race: the watcher (e.g. xapp-sn-watcher) may not be up yet; ksni registers once it appears.
+    let handle = tray.assume_sni_available(true).spawn().map_err(|e| io::Error::other(format!("no system tray available: {e}")))?;
     let pulser = handle.clone();
     std::thread::spawn(move || {
         while let Some(()) = pulser.update(|t| t.blink = t.attention && !t.blink) {
