@@ -1,6 +1,31 @@
-# sysdoctor
+<p align="center">
+  <img src="assets/sysdoctor.png" width="128" alt="sysdoctor icon: a green heart with a pulse line">
+</p>
 
-A health check and cleanup advisor for Linux desktops and servers, in one small Rust binary.
+<h1 align="center">sysdoctor</h1>
+
+<p align="center">
+  A health check and cleanup advisor for Linux desktops and servers, in one small Rust binary.
+</p>
+
+<p align="center">
+  <a href="https://github.com/fagostini/sysdoctor/releases/latest"><img src="https://img.shields.io/github/v/release/fagostini/sysdoctor?color=33d17a" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/fagostini/sysdoctor" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/rust-1.85%2B-orange?logo=rust" alt="Rust 1.85+">
+  <img src="https://img.shields.io/badge/platform-Linux-informational?logo=linux&logoColor=white" alt="Linux">
+</p>
+
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#sysdoctor-gui">Report window</a> ·
+  <a href="#sysdoctor-tray---install">Tray icon</a> ·
+  <a href="#custom-checks">Custom checks</a>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/report-window.png" width="720" alt="The sysdoctor report window, Health tab, listing four warnings with Run and Ignore buttons">
+</p>
 
 ```
 $ sysdoctor check
@@ -168,6 +193,8 @@ Shows each problem's fix command and asks before running it. Commands run in you
 ### `sysdoctor gui`
 
 The whole report in one window (build with `--features gui`):
+
+<img src="assets/screenshots/cleanup.png" width="600" alt="Report window, Cleanup tab: reclaimable items with sizes, tick boxes and a live selected total">
 
 - **Health** tab: one card per problem with its fix command, a **Run…** button and an **Ignore** button. Passing checks are folded away. Ignored problems stay listed, dimmed, with **Stop ignoring**.
 - **Cleanup** tab: every reclaimable item with its size and exact command or folders. Regenerable items start ticked, items that need a decision start unticked. The header shows *Selected: X of Y reclaimable* as you tick.
